@@ -6,11 +6,28 @@ export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
 export class LlmError extends Error {
   readonly retryable: boolean;
-  constructor(message: string, retryable: boolean) {
+  /** Honoured before retrying. Providers set it from a Retry-After header. */
+  readonly retryAfterMs?: number;
+  constructor(message: string, retryable: boolean, retryAfterMs?: number) {
     super(message);
     this.name = "LlmError";
     this.retryable = retryable;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+/** Seconds or an HTTP date, per RFC 9110. */
+export function parseRetryAfter(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  // A numeric value is a seconds count; if it is nonsense, do not fall through to
+  // date parsing, which happily reads "-5" as a year and yields "retry now".
+  const seconds = Number(value.trim());
+  if (Number.isFinite(seconds)) {
+    return seconds >= 0 ? seconds * 1000 : undefined;
+  }
+  const at = Date.parse(value);
+  if (Number.isNaN(at)) return undefined;
+  return Math.max(0, at - Date.now());
 }
 
 export interface JsonRequest {

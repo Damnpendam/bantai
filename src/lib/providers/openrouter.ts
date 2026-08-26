@@ -1,5 +1,12 @@
 import OpenAI from "openai";
-import { LlmError, type Effort, type JsonRequest, type ModelOption, type Provider } from "./types";
+import {
+  LlmError,
+  parseRetryAfter,
+  type Effort,
+  type JsonRequest,
+  type ModelOption,
+  type Provider,
+} from "./types";
 
 const BASE_URL = "https://openrouter.ai/api/v1";
 
@@ -69,7 +76,8 @@ function describe(error: unknown): LlmError {
       );
     }
     if (error.status === 429) {
-      return new LlmError("Rate limited by OpenRouter.", true);
+      const after = parseRetryAfter(error.headers?.get?.("retry-after"));
+      return new LlmError("Rate limited by OpenRouter.", true, after);
     }
     if (error.status === 400) {
       return new LlmError(`OpenRouter rejected the request: ${message}`, false);

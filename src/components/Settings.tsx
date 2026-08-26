@@ -19,6 +19,7 @@ export interface SettingsState {
   provider: string;
   model: string;
   effort: string;
+  concurrency: number;
   providers: ProviderInfo[];
 }
 
@@ -99,6 +100,7 @@ export function Settings({
         apiKeyProvider: selected,
         model: state!.model,
         effort: state!.effort,
+        concurrency: state!.concurrency,
       }),
     });
     const body = await response.json();
@@ -204,6 +206,25 @@ export function Settings({
           Higher effort means deeper reasoning per agent, more tokens, and a slower run.
           Providers expose fewer levels than this scale, so xhigh and max both map to
           their highest.
+        </p>
+
+        <label className="mt-4 block text-sm font-medium">Agents at once</label>
+        <select
+          value={state.concurrency}
+          onChange={(e) =>
+            setState({ ...state, concurrency: Number(e.target.value) })
+          }
+          className="mt-1.5 w-full rounded-lg border border-line-strong bg-canvas px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-accent/40"
+        >
+          {[1, 2, 3, 4].map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+        <p className="mt-1.5 text-xs text-ink-faint">
+          Each wave has four agents. Running all four at once is fastest, but free
+          tiers reject bursts — drop to 1 or 2 if suites fail with rate-limit errors.
         </p>
 
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}

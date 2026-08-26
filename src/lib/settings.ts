@@ -12,7 +12,13 @@ export interface AppConfig {
   provider: ProviderId;
   model: string;
   effort: Effort;
+  /** How many writer agents may run at once. Free tiers reject bursts of four. */
+  concurrency: number;
 }
+
+export const MIN_CONCURRENCY = 1;
+export const MAX_CONCURRENCY = 4;
+export const DEFAULT_CONCURRENCY = 2;
 
 function keyName(provider: ProviderId): string {
   return `apiKey:${provider}`;
@@ -66,12 +72,26 @@ export function getConfig(): AppConfig {
   // Models are per-provider: a Claude id is meaningless once you switch to Gemini.
   const model = getSetting(`model:${provider}`) ?? getProvider(provider).defaultModel;
 
-  return { provider, model, effort };
+  // Number(null) is 0, which would clamp to 1 and quietly replace the default.
+  const storedConcurrency = getSetting("concurrency");
+  const parsed = storedConcurrency === null ? NaN : Number(storedConcurrency);
+  const concurrency = Number.isFinite(parsed)
+    ? Math.min(MAX_CONCURRENCY, Math.max(MIN_CONCURRENCY, Math.trunc(parsed)))
+    : DEFAULT_CONCURRENCY;
+
+  return { provider, model, effort, concurrency };
 }
 
 export function setConfig(patch: Partial<AppConfig>): void {
   if (patch.provider) setSetting("provider", patch.provider);
   if (patch.effort) setSetting("effort", patch.effort);
+  if (patch.concurrency !== undefined) {
+    const n = Math.min(
+      MAX_CONCURRENCY,
+      Math.max(MIN_CONCURRENCY, Math.trunc(patch.concurrency)),
+    );
+    setSetting("concurrency", String(n));
+  }
   if (patch.model) {
     const provider = patch.provider ?? getConfig().provider;
     setSetting(`model:${provider}`, patch.model);

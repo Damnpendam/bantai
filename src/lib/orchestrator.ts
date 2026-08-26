@@ -141,6 +141,19 @@ class RunContext {
   }
 }
 
+/** Runs tasks at most `limit` at a time, preserving per-task error isolation. */
+async function pool<T>(items: T[], limit: number, run: (item: T) => Promise<void>) {
+  const queue = [...items];
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const item = queue.shift();
+      if (item === undefined) return;
+      await run(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
 async function runWave(
   ctx: RunContext,
   wave: AgentSpec[],
@@ -148,11 +161,15 @@ async function runWave(
   requirements: RunRecord["requirements"],
 ): Promise<void> {
   const writer = makeLlm(64000);
+  const { concurrency } = getConfig();
   // Wave 2 reads what wave 1 produced; snapshot before any of them append.
   const snapshot = ctx.all;
 
-  await Promise.all(
-    wave.map(async (spec) => {
+  if (concurrency < wave.length) {
+    ctx.log(`Running ${wave.length} agents ${concurrency} at a time.`);
+  }
+
+  await pool(wave, concurrency, async (spec) => {
       ctx.mark(spec.id, "running");
       try {
         let salvaged = false;
@@ -180,8 +197,7 @@ async function runWave(
         ctx.agent(spec.id, { status: "failed", error: message, finishedAt: Date.now() });
         ctx.log(`${spec.label} failed: ${message}`);
       }
-    }),
-  );
+    });
 }
 
 async function runReviewStage(
@@ -206,8 +222,7 @@ async function runReviewStage(
 
   if (report.gapsByDiscipline.length > 0) {
     const writer = makeLlm(64000);
-    await Promise.all(
-      report.gapsByDiscipline.map(async (gap) => {
+    await pool(report.gapsByDiscipline, getConfig().concurrency, async (gap) => {
         const spec = AGENTS.find((a) => a.id === gap.discipline);
         if (!spec) return;
         ctx.mark(spec.id, "repairing");
@@ -232,8 +247,7 @@ async function runReviewStage(
           );
         }
         ctx.mark(spec.id, "done");
-      }),
-    );
+      });
 
     const covered = new Set(ctx.all.flatMap((c) => c.requirementIds));
     const uncovered = requirements.filter((r) => !covered.has(r.id)).map((r) => r.id);

@@ -1,5 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { LlmError, type JsonRequest, type ModelOption, type Provider } from "./types";
+import {
+  LlmError,
+  parseRetryAfter,
+  type JsonRequest,
+  type ModelOption,
+  type Provider,
+} from "./types";
 
 /** The SDK stringifies the whole JSON body into .message; pull out the human part. */
 function apiMessage(error: { error?: unknown; message: string }): string {
@@ -12,7 +18,11 @@ function describe(error: unknown): LlmError {
     return new LlmError("The Anthropic API key was rejected. Check it in settings.", false);
   }
   if (error instanceof Anthropic.RateLimitError) {
-    return new LlmError("Rate limited by the Anthropic API.", true);
+    return new LlmError(
+      "Rate limited by the Anthropic API.",
+      true,
+      parseRetryAfter(error.headers?.get?.("retry-after")),
+    );
   }
   if (error instanceof Anthropic.BadRequestError) {
     const message = apiMessage(error);

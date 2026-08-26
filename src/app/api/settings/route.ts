@@ -42,6 +42,7 @@ export async function POST(request: Request) {
     apiKeyProvider?: string;
     model?: string;
     effort?: string;
+    concurrency?: number;
   };
 
   // A key is always saved against a named provider, never the active one — the
@@ -68,10 +69,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: `Unknown effort "${body.effort}".` }, { status: 400 });
   }
 
+  if (body.concurrency !== undefined && !Number.isFinite(body.concurrency)) {
+    return NextResponse.json({ error: "concurrency must be a number." }, { status: 400 });
+  }
+
   setConfig({
     provider: body.provider as ProviderId | undefined,
     model: body.model,
     effort: body.effort as Effort | undefined,
+    concurrency: body.concurrency,
   });
 
   return NextResponse.json(snapshot());

@@ -61,6 +61,13 @@ that file is where you tune what a discipline means for your team.
 npm install && npm run dev
 ```
 
+Tests cover the pure logic that is hardest to get right — recovering truncated,
+fence-wrapped and prose-wrapped model output, and parsing `Retry-After`:
+
+```bash
+npm test
+```
+
 Open the app, click **Add API key**, pick a provider, and paste a key. Keys are stored
 per provider in the local SQLite database at `data/bantai.db` and are sent only to the
 provider they belong to. Then create a project, upload documents, and click
@@ -101,6 +108,13 @@ works — nothing here hardcodes a model line-up that will go stale.
 Effort is one five-step scale across providers. Gemini exposes four thinking levels, so
 `xhigh` and `max` both map to its highest.
 
+### Agents at once
+
+A wave contains four agents. Running all four together is fastest, but free tiers reject
+bursts and every suite fails with a rate-limit error. **Agents at once** in settings caps
+how many run concurrently — drop to 1 or 2 on a free tier. Rate-limit retries honour the
+provider's `Retry-After` header and back off rather than retrying immediately.
+
 ### Adding another provider
 
 Implement [`Provider`](src/lib/providers/types.ts) — `json`, `verifyKey`, `listModels` —
@@ -120,6 +134,7 @@ src/lib/orchestrator.ts      the stage machine: one stage per invocation, resuma
 src/lib/llm.ts               provider-agnostic structured call, parse and retry
 src/lib/providers/           one file per provider, behind a single interface
 src/lib/settings.ts          per-provider keys and models, with legacy migration
+src/lib/json-salvage.ts      recovery of truncated or wrapped model output
 src/lib/export.ts            the five export formats
 src/lib/store.ts             node:sqlite persistence — no native build step
 ```

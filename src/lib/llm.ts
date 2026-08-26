@@ -11,6 +11,24 @@ export type { Effort, ProviderId };
  */
 const STALL_MS = 180_000;
 
+/** Retrying a rate limit immediately just burns the second attempt. */
+const BACKOFF_MS = [5_000, 20_000];
+const MAX_BACKOFF_MS = 60_000;
+
+function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(new LlmError("Cancelled.", false));
+      },
+      { once: true },
+    );
+  });
+}
+
 export interface LlmOptions {
   provider: ProviderId;
   apiKey: string;
@@ -94,15 +112,23 @@ export class Llm {
       return args.validate ? args.validate(parsed.value) : (parsed.value as T);
     };
 
-    try {
-      return await attempt();
-    } catch (error) {
-      const wrapped =
-        error instanceof LlmError
-          ? error
-          : new LlmError(error instanceof Error ? error.message : String(error), false);
-      if (!wrapped.retryable) throw wrapped;
-      return attempt();
+    let lastError: LlmError | undefined;
+    for (let tries = 0; tries <= BACKOFF_MS.length; tries += 1) {
+      try {
+        return await attempt();
+      } catch (error) {
+        lastError =
+          error instanceof LlmError
+            ? error
+            : new LlmError(error instanceof Error ? error.message : String(error), false);
+        if (!lastError.retryable || tries === BACKOFF_MS.length) throw lastError;
+        const delay = Math.min(
+          lastError.retryAfterMs ?? BACKOFF_MS[tries],
+          MAX_BACKOFF_MS,
+        );
+        await wait(delay, args.signal);
+      }
     }
+    throw lastError ?? new LlmError("The call failed for an unknown reason.", false);
   }
 }
