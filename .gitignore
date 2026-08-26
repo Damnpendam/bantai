@@ -1,0 +1,10 @@
+node_modules
+.next
+# -wal and -shm hold recent writes in plaintext, API keys included.
+data/*.db*
+data/uploads/*
+!data/uploads/.gitkeep
+.env*
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store

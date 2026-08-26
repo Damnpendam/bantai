@@ -1,0 +1,142 @@
+# Bantai
+
+A test-case authoring swarm. Upload the requirement documents for a product, and ten
+agents plan the testing and write the suite: an architect who decomposes the problem,
+eight specialist writers, and a reviewer who dedupes the result and closes the gaps.
+
+## How a run works
+
+1. **Ingest** — pdf, docx, md, txt, csv, json, yaml and html are parsed to text.
+2. **Requirements** — the corpus is broken into atomic, numbered, testable requirements
+   (`REQ-001…`). Everything downstream is traceable to these.
+3. **Test architect** — writes the plan (risk areas, entry and exit criteria) and a brief
+   for each specialist: what to focus on, which requirements it owns, how many cases to
+   aim for, and what to leave to another agent.
+4. **Wave 1** — sanity, smoke, unit and functional run in parallel. They depend only on
+   the plan, so there is nothing to serialise.
+5. **Wave 2** — edge cases, monkey, creative and adversarial run next, each holding the
+   titles of everything wave 1 wrote. That digest is what stops the second wave
+   re-deriving cases the first wave already has.
+6. **Reviewer** — flags duplicates, computes requirement coverage, and lists per-suite
+   gaps. Any suite with gaps gets one targeted repair pass — the agent is re-invoked with
+   only the gap list, not the whole brief.
+7. **Export** — CSV, Markdown, JSON, Jira/Xray CSV, TestRail CSV.
+
+## The plan gate
+
+A run does not go straight through. It extracts requirements, writes the plan, and then
+**stops**, before any writer agent has spent anything. You read the briefs — what each
+agent will focus on, which requirements it owns, how many cases it intends to write, and
+what it has been told to leave to someone else — and then choose:
+
+- **Run the rest** — everything from here to the export, no further stops.
+- **Run next stage only** — execute one stage, then pause again.
+
+Stages are `requirements → plan → wave1 → wave2 → review`. Each one persists its results
+before returning, which has two consequences worth knowing: a paused run survives a
+server restart and can be resumed exactly where it stopped, and the projected case count
+is visible before you commit to paying for it.
+
+Cancelling from a pause closes the run out rather than leaving it waiting forever.
+
+## The eight disciplines
+
+| Agent | Wave | Writes |
+|---|---|---|
+| Sanity | 1 | One shallow pass per capability, happy path only |
+| Smoke | 1 | Cross-feature journeys and integration seams — the release gate |
+| Unit | 1 | Function, validator and state-machine level, every branch and rule |
+| Functional | 1 | Every acceptance criterion, across the valid range of usage |
+| Edge cases | 2 | Boundaries, empty states, time, concurrency, scale, unicode |
+| Monkey | 2 | Rapid, out-of-order, garbage input; hostile environments |
+| Creative | 2 | Persona-driven journeys the spec never modelled |
+| Adversarial | 2 | Authorisation, client-trust, data integrity, injection |
+
+Each agent's charter lives in [`src/lib/agents/roster.ts`](src/lib/agents/roster.ts) —
+that file is where you tune what a discipline means for your team.
+
+## Running it
+
+```bash
+npm install && npm run dev
+```
+
+Open the app, click **Add API key**, pick a provider, and paste a key. Keys are stored
+per provider in the local SQLite database at `data/bantai.db` and are sent only to the
+provider they belong to. Then create a project, upload documents, and click
+**Generate test cases**.
+
+`examples/sample-prd.md` is a small checkout spec you can use to try a run.
+
+## Providers
+
+| Provider | Structured output | Effort control | Catalogue |
+|---|---|---|---|
+| OpenRouter | `response_format` json_schema, `strict` | `reasoning.effort`, three levels | public |
+| Anthropic | `output_config.format` json_schema | `effort`, five levels | needs key |
+| Google Gemini | `responseJsonSchema` + `application/json` | `thinkingLevel`, four levels | needs key |
+
+**OpenRouter is the default.** One key reaches Claude, Gemini, GPT, DeepSeek, Qwen and
+open models, which avoids setting up each vendor separately. The model picker lists only
+models advertising structured-output support — around 330 of the 418 on offer — because
+every agent here depends on it, and it shows output price per million tokens so the cost
+of a run is visible before you start it. That catalogue is public, so the picker works
+before you save a key.
+
+Two provider-specific details worth knowing:
+
+- Strict schema mode accepts only a subset of JSON Schema. `minItems`, `minimum` and
+  `maximum` are rejected rather than ignored, so they are stripped for OpenRouter only —
+  the canonical schemas in `src/lib/agents/schemas.ts` stay expressive for providers that
+  accept them.
+- Not every model behind OpenRouter honours `json_schema` even when it advertises it. On
+  rejection the request retries once with `json_object` and the schema inlined into the
+  system prompt.
+
+You can keep a key for each and switch between them; the selected model is remembered
+per provider, so flipping back does not lose your choice. The model field is free text
+with a live list from your account, so a model released after this app was built still
+works — nothing here hardcodes a model line-up that will go stale.
+
+Effort is one five-step scale across providers. Gemini exposes four thinking levels, so
+`xhigh` and `max` both map to its highest.
+
+### Adding another provider
+
+Implement [`Provider`](src/lib/providers/types.ts) — `json`, `verifyKey`, `listModels` —
+and register it in [`src/lib/providers/index.ts`](src/lib/providers/index.ts). The
+provider returns raw JSON text; parsing, schema validation and retry are handled once in
+[`src/lib/llm.ts`](src/lib/llm.ts), so a new provider gets that behaviour for free.
+Nothing in the agents, the orchestrator or the UI is provider-aware.
+
+## Layout
+
+```
+src/lib/agents/roster.ts     charters — the prompt content that defines each discipline
+src/lib/agents/planner.ts    requirement extraction and the test plan
+src/lib/agents/writer.ts     the shared suite writer, plus the wave 2 coverage digest
+src/lib/agents/reviewer.ts   dedupe, coverage arithmetic, gap detection
+src/lib/orchestrator.ts      the stage machine: one stage per invocation, resumable
+src/lib/llm.ts               provider-agnostic structured call, parse and retry
+src/lib/providers/           one file per provider, behind a single interface
+src/lib/settings.ts          per-provider keys and models, with legacy migration
+src/lib/export.ts            the five export formats
+src/lib/store.ts             node:sqlite persistence — no native build step
+```
+
+## Notes
+
+- Runs report over SSE. Reloading the page reattaches to a run in flight; the event
+  backlog is replayed so nothing is missed. Because each stage persists before it
+  returns, a paused run is held in the database rather than in memory and survives the
+  process dying.
+- Free tiers rate-limit hard, and a wave fires four agents at once. If suites fail with
+  rate-limit errors, that is the cause — a pinned paid model at a few cents per run
+  avoids it.
+- A failed specialist does not fail the run — it is marked failed and the other agents
+  continue. Only a failed extraction or plan aborts everything.
+- CSV exports neutralise leading `=`, `+`, `-` and `@` so a payload written by the
+  adversarial agent cannot execute when the export is opened in a spreadsheet.
+- Billing and quota failures are translated into plain language. Both providers return
+  them under status codes that otherwise read as request bugs (Anthropic: 400,
+  Gemini: 429), which sends you looking in the wrong place.
