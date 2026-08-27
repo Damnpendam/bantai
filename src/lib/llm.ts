@@ -9,7 +9,7 @@ export type { Effort, ProviderId };
  * tokens rather than as a total, so a legitimately long suite is never cut off
  * while it is still streaming.
  */
-const STALL_MS = 180_000;
+const STALL_MS = 300_000;
 
 /** Retrying a rate limit immediately just burns the second attempt. */
 const BACKOFF_MS = [5_000, 20_000];
@@ -35,6 +35,8 @@ export interface LlmOptions {
   model: string;
   effort: Effort;
   maxTokens: number;
+  /** Aborts every call made through this instance, e.g. when a run is cancelled. */
+  signal?: AbortSignal;
 }
 
 export interface JsonCallArgs<T> {
@@ -70,6 +72,7 @@ export class Llm {
 
       const signals = [watchdog.signal];
       if (args.signal) signals.push(args.signal);
+      if (this.options.signal) signals.push(this.options.signal);
 
       let text: string;
       try {
@@ -80,14 +83,19 @@ export class Llm {
           maxTokens: this.options.maxTokens,
           effort: this.options.effort,
           signal: AbortSignal.any(signals),
-          // Always observe the stream, even when the caller wants no tokens —
-          // this is what tells the watchdog the call is still alive.
+          // Liveness comes from any stream event, not just visible output.
+          onActivity: () => {
+            lastActivity = Date.now();
+          },
           onToken: (delta) => {
             lastActivity = Date.now();
             args.onToken?.(delta);
           },
         });
       } catch (error) {
+        if (this.options.signal?.aborted || args.signal?.aborted) {
+          throw new LlmError("Cancelled.", false);
+        }
         if (watchdog.signal.aborted) {
           throw new LlmError(
             `${provider.label} stopped sending data for ${STALL_MS / 1000}s and the call was abandoned. The model may be overloaded — try another in settings.`,

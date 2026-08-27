@@ -158,6 +158,10 @@ export const openrouterProvider: Provider = {
       let text = "";
       let finish: string | null = null;
       for await (const chunk of stream) {
+        // Any chunk at all proves the call is alive. On a reasoning model the
+        // thinking arrives first on delta.reasoning_details with empty content,
+        // so counting only content would make a healthy call look stalled.
+        request.onActivity?.();
         const choice = chunk.choices?.[0];
         const delta = choice?.delta?.content;
         if (delta) {

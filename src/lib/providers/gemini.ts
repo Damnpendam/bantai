@@ -111,6 +111,7 @@ export const geminiProvider: Provider = {
       let text = "";
       let finishReason: string | undefined;
       for await (const chunk of stream) {
+        request.onActivity?.();
         const delta = chunk.text;
         if (delta) {
           text += delta;

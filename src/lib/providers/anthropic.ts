@@ -81,6 +81,10 @@ export const anthropicProvider: Provider = {
       if (request.onToken) {
         stream.on("text", (delta) => request.onToken!(delta));
       }
+      // Thinking blocks and every other event count as liveness.
+      if (request.onActivity) {
+        stream.on("streamEvent", () => request.onActivity!());
+      }
 
       const message = await stream.finalMessage();
 

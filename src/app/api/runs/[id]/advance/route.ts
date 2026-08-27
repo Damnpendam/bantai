@@ -13,9 +13,12 @@ export async function POST(
   const run = getRun(id);
   if (!run) return NextResponse.json({ error: "No such run." }, { status: 404 });
 
-  if (run.status !== "paused") {
+  // A failed run keeps nextStage pointing at the stage that failed, so retrying
+  // resumes there instead of throwing away every suite already written.
+  const resumable = run.status === "paused" || run.status === "failed";
+  if (!resumable) {
     return NextResponse.json(
-      { error: `This run is ${run.status}, not paused.` },
+      { error: `This run is ${run.status} and cannot be continued.` },
       { status: 409 },
     );
   }
@@ -23,7 +26,10 @@ export async function POST(
     return NextResponse.json({ error: "A stage is already running." }, { status: 409 });
   }
   if (!run.nextStage) {
-    return NextResponse.json({ error: "Nothing left to run." }, { status: 409 });
+    return NextResponse.json(
+      { error: "Nothing left to run — start a new run instead." },
+      { status: 409 },
+    );
   }
 
   const { mode } = (await request.json().catch(() => ({}))) as { mode?: string };
@@ -35,5 +41,9 @@ export async function POST(
   }
 
   advanceRun(id, mode as RunMode);
-  return NextResponse.json({ ok: true, stage: run.nextStage });
+  return NextResponse.json({
+    ok: true,
+    stage: run.nextStage,
+    retried: run.status === "failed",
+  });
 }

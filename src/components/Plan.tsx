@@ -83,44 +83,62 @@ export function PlanPanel({ plan }: { plan: TestPlan }) {
 export function Gate({
   nextStage,
   atPlanGate,
+  failed,
+  error,
+  caseCount,
   busy,
   onAdvance,
   onCancel,
 }: {
   nextStage: Stage;
   atPlanGate: boolean;
+  failed: boolean;
+  error: string | null;
+  caseCount: number;
   busy: boolean;
   onAdvance: (mode: RunMode) => void;
   onCancel: () => void;
 }) {
+  const heading = failed
+    ? `The ${STAGE_LABEL[nextStage]} stage failed`
+    : atPlanGate
+      ? "Plan ready for review"
+      : "Paused between stages";
+
   return (
     <div
       className={clsx(
         "rounded-xl border px-4 py-3",
-        "border-amber-500/40 bg-amber-500/10",
+        failed
+          ? "border-red-500/40 bg-red-500/10"
+          : "border-amber-500/40 bg-amber-500/10",
       )}
     >
-      <p className="text-sm font-medium text-ink">
-        {atPlanGate ? "Plan ready for review" : "Paused between stages"}
-      </p>
+      <p className="text-sm font-medium text-ink">{heading}</p>
       <p className="mt-0.5 text-sm text-ink-soft">
-        {atPlanGate
-          ? "No test cases have been written yet, and nothing has been spent on the writer agents. Read the briefs below, then choose how to continue."
-          : `Next up: ${STAGE_LABEL[nextStage]}.`}
+        {failed
+          ? `${error ?? "The stage did not complete."} ${
+              caseCount > 0
+                ? `The ${caseCount} cases already written are kept — retrying resumes from this stage.`
+                : "Retrying resumes from this stage."
+            }`
+          : atPlanGate
+            ? "No test cases have been written yet, and nothing has been spent on the writer agents. Read the briefs below, then choose how to continue."
+            : `Next up: ${STAGE_LABEL[nextStage]}.`}
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         <Button variant="primary" disabled={busy} onClick={() => onAdvance("all")}>
-          {busy ? <Spinner /> : null} Run the rest
+          {busy ? <Spinner /> : null} {failed ? "Retry and run the rest" : "Run the rest"}
         </Button>
         <Button disabled={busy} onClick={() => onAdvance("step")}>
-          Run next stage only
+          {failed ? "Retry this stage only" : "Run next stage only"}
         </Button>
         <Button variant="ghost" disabled={busy} onClick={onCancel}>
-          Cancel run
+          {failed ? "Abandon run" : "Cancel run"}
         </Button>
       </div>
       <p className="mt-2 text-xs text-ink-faint">
-        Next stage: {STAGE_LABEL[nextStage]}
+        {failed ? "Resumes at" : "Next stage"}: {STAGE_LABEL[nextStage]}
       </p>
     </div>
   );

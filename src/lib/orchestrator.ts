@@ -39,7 +39,7 @@ export function isRunning(runId: string): boolean {
   return inFlight.has(runId);
 }
 
-function makeLlm(maxTokens: number): Llm {
+function makeLlm(maxTokens: number, signal?: AbortSignal): Llm {
   const config = getConfig();
   const apiKey = getApiKey(config.provider);
   if (!apiKey) {
@@ -47,7 +47,7 @@ function makeLlm(maxTokens: number): Llm {
       `No ${getProvider(config.provider).label} API key configured. Add one in settings.`,
     );
   }
-  return new Llm({ ...config, apiKey, maxTokens });
+  return new Llm({ ...config, apiKey, maxTokens, signal });
 }
 
 const STATUS_FOR: Record<Stage, RunStatus> = {
@@ -159,8 +159,9 @@ async function runWave(
   wave: AgentSpec[],
   plan: TestPlan,
   requirements: RunRecord["requirements"],
+  signal: AbortSignal,
 ): Promise<void> {
-  const writer = makeLlm(64000);
+  const writer = makeLlm(64000, signal);
   const { concurrency } = getConfig();
   // Wave 2 reads what wave 1 produced; snapshot before any of them append.
   const snapshot = ctx.all;
@@ -204,9 +205,10 @@ async function runReviewStage(
   ctx: RunContext,
   plan: TestPlan,
   requirements: RunRecord["requirements"],
+  signal: AbortSignal,
 ): Promise<void> {
   ctx.mark("reviewer", "running");
-  const reviewer = makeLlm(32000);
+  const reviewer = makeLlm(32000, signal);
   let report = await review(reviewer, ctx.all, requirements, ctx.progress("Reviewer"));
   ctx.log(
     `Reviewer flagged ${report.duplicatesRemoved.length} duplicates and ${report.gapsByDiscipline.length} suites with gaps.`,
@@ -221,7 +223,7 @@ async function runReviewStage(
   }
 
   if (report.gapsByDiscipline.length > 0) {
-    const writer = makeLlm(64000);
+    const writer = makeLlm(64000, signal);
     await pool(report.gapsByDiscipline, getConfig().concurrency, async (gap) => {
         const spec = AGENTS.find((a) => a.id === gap.discipline);
         if (!spec) return;
@@ -269,7 +271,7 @@ async function runReviewStage(
 }
 
 /** Runs exactly one stage and persists everything it produced. */
-async function runStage(run: RunRecord, stage: Stage): Promise<void> {
+async function runStage(run: RunRecord, stage: Stage, signal: AbortSignal): Promise<void> {
   const ctx = new RunContext(run);
   ctx.setStatus(STATUS_FOR[stage]);
 
@@ -281,7 +283,7 @@ async function runStage(run: RunRecord, stage: Stage): Promise<void> {
     ctx.mark("planner", "running");
     ctx.log(`Reading ${documents.length} document(s).`);
     const requirements = await extractRequirements(
-      makeLlm(32000),
+      makeLlm(32000, signal),
       documents.map((d) => ({ name: d.name, text: d.text })),
       ctx.progress("Requirement analyst"),
     );
@@ -296,7 +298,7 @@ async function runStage(run: RunRecord, stage: Stage): Promise<void> {
 
   if (stage === "plan") {
     const plan = await buildPlan(
-      makeLlm(32000),
+      makeLlm(32000, signal),
       current.requirements,
       ctx.progress("Test architect"),
     );
@@ -312,14 +314,14 @@ async function runStage(run: RunRecord, stage: Stage): Promise<void> {
   if (!current.plan) throw new Error("No test plan to work from.");
 
   if (stage === "wave1") {
-    await runWave(ctx, WAVE1, current.plan, current.requirements);
+    await runWave(ctx, WAVE1, current.plan, current.requirements, signal);
     return;
   }
   if (stage === "wave2") {
-    await runWave(ctx, WAVE2, current.plan, current.requirements);
+    await runWave(ctx, WAVE2, current.plan, current.requirements, signal);
     return;
   }
-  await runReviewStage(ctx, current.plan, current.requirements);
+  await runReviewStage(ctx, current.plan, current.requirements, signal);
 }
 
 /**
@@ -346,7 +348,7 @@ async function drive(runId: string, mode: RunMode): Promise<void> {
       if (controller.signal.aborted) return;
 
       const stage = run.nextStage;
-      await runStage(run, stage);
+      await runStage(run, stage, controller.signal);
 
       const following = nextAfter(stage);
       updateRun(runId, { nextStage: following });
@@ -377,6 +379,8 @@ async function drive(runId: string, mode: RunMode): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     const run = getRun(runId);
     if (run) new RunContext(run).failInFlight(message);
+    // nextStage is deliberately left pointing at the stage that failed, so the
+    // work already done is kept and the stage can be retried on its own.
     updateRun(runId, { status: "failed", error: message });
     emit(runId, { type: "error", payload: message });
     emit(runId, { type: "status", payload: "failed" });
@@ -392,6 +396,6 @@ export function startRun(run: RunRecord): void {
 }
 
 export function advanceRun(runId: string, mode: RunMode): void {
-  updateRun(runId, { mode });
+  updateRun(runId, { mode, error: null });
   void drive(runId, mode);
 }

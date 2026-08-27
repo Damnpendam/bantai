@@ -81,6 +81,8 @@ export default function Home() {
   const activeProvider =
     settings?.providers.find((p) => p.id === settings.provider) ?? null;
   const paused = run?.status === "paused";
+  // A failed run that still knows which stage broke can be retried from there.
+  const resumable = paused || (run?.status === "failed" && Boolean(run.nextStage));
 
   const loadProjects = useCallback(async () => {
     const data = await fetch("/api/projects").then((r) => r.json());
@@ -310,10 +312,12 @@ export default function Home() {
                     <Button size="sm" onClick={() => void cancel()}>
                       Cancel
                     </Button>
-                  ) : paused ? (
+                  ) : resumable ? (
                     // The gate owns the controls; starting a second run here would
                     // orphan the one already waiting.
-                    <Badge tone="warn">waiting on you</Badge>
+                    <Badge tone={run?.status === "failed" ? "bad" : "warn"}>
+                      {run?.status === "failed" ? "needs a retry" : "waiting on you"}
+                    </Badge>
                   ) : (
                     <Button
                       size="sm"
@@ -340,7 +344,7 @@ export default function Home() {
                 />
               </div>
 
-              {notice || run?.error ? (
+              {notice || (run?.error && !resumable) ? (
                 <p className="border-t border-line px-4 py-2.5 text-sm text-red-600">
                   {notice ?? run?.error}
                 </p>
@@ -376,10 +380,13 @@ export default function Home() {
           </div>
 
           <div className="space-y-5">
-            {run?.status === "paused" && run.nextStage ? (
+            {resumable && run?.nextStage ? (
               <Gate
                 nextStage={run.nextStage}
-                atPlanGate={run.nextStage === "wave1"}
+                atPlanGate={run.status === "paused" && run.nextStage === "wave1"}
+                failed={run.status === "failed"}
+                error={run.error}
+                caseCount={run.cases.length}
                 busy={advancing}
                 onAdvance={advance}
                 onCancel={() => void cancel()}

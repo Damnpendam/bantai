@@ -37,7 +37,14 @@ export interface JsonRequest {
   maxTokens: number;
   effort: Effort;
   signal?: AbortSignal;
+  /** Visible output, for progress reporting. */
   onToken?: (delta: string) => void;
+  /**
+   * Called for every stream event, including reasoning-only ones that carry no
+   * visible text. Reasoning models emit nothing but thinking for minutes, so this
+   * is what distinguishes a working call from a dead one.
+   */
+  onActivity?: () => void;
 }
 
 export interface ModelOption {
