@@ -111,8 +111,10 @@ export const geminiProvider: Provider = {
       let text = "";
       let finishReason: string | undefined;
       for await (const chunk of stream) {
-        request.onActivity?.();
         const delta = chunk.text;
+        // Thought parts carry no text but prove the call is progressing.
+        const thought = chunk.candidates?.[0]?.content?.parts?.some((p) => p.thought);
+        if (delta || thought) request.onActivity?.();
         if (delta) {
           text += delta;
           request.onToken?.(delta);

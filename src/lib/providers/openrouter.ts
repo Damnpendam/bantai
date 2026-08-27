@@ -158,15 +158,22 @@ export const openrouterProvider: Provider = {
       let text = "";
       let finish: string | null = null;
       for await (const chunk of stream) {
-        // Any chunk at all proves the call is alive. On a reasoning model the
-        // thinking arrives first on delta.reasoning_details with empty content,
-        // so counting only content would make a healthy call look stalled.
-        request.onActivity?.();
         const choice = chunk.choices?.[0];
-        const delta = choice?.delta?.content;
-        if (delta) {
-          text += delta;
-          request.onToken?.(delta);
+        const delta = choice?.delta as
+          | { content?: string; reasoning?: string; reasoning_details?: unknown[] }
+          | undefined;
+
+        // Reasoning models emit thinking on reasoning_details before any content,
+        // so counting only content makes a healthy call look stalled. Require some
+        // payload though: treating every chunk as alive would let an upstream that
+        // only sends keep-alives hold the call open forever.
+        const reasoned =
+          Boolean(delta?.reasoning) || Boolean(delta?.reasoning_details?.length);
+        if (delta?.content || reasoned) request.onActivity?.();
+
+        if (delta?.content) {
+          text += delta.content;
+          request.onToken?.(delta.content);
         }
         if (choice?.finish_reason) finish = choice.finish_reason;
       }

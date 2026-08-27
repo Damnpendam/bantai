@@ -1,5 +1,6 @@
 import { Llm } from "@/lib/llm";
 import { reviewSchema } from "@/lib/agents/schemas";
+import { findCandidatePairs } from "@/lib/agents/similarity";
 import type { Discipline, Requirement, ReviewReport, TestCase } from "@/lib/types";
 
 const REVIEW_SYSTEM = `You are the test lead reviewing a suite assembled by eight specialist agents working in
@@ -7,11 +8,12 @@ parallel. You did not write any of it. Your job is to make the suite trustworthy
 
 Do three things:
 
-1. Duplicates. Two cases are duplicates when a single test run would satisfy both — same behaviour, same
-   condition, same assertion, regardless of wording or which agent wrote them. Different data at the same
-   boundary is a duplicate; different boundaries are not. When you find a pair, keep the case with the more
-   precise expected result and list the other's id in duplicateIds. Be decisive but conservative: it is worse
-   to delete a real case than to leave a near-duplicate.
+1. Duplicates. You are given a shortlist of case pairs whose titles are textually similar. Judge only those
+   pairs — do not go hunting through the whole suite. Two cases are duplicates when a single test run would
+   satisfy both: same behaviour, same condition, same assertion. Different data at the same boundary is a
+   duplicate; different boundaries are not. Similar wording about genuinely different conditions is not.
+   For each pair that is a real duplicate, keep the case with the more precise expected result and put the
+   other's id in duplicateIds. Most shortlisted pairs will not be duplicates; saying so is the right answer.
 
 2. Coverage. List every requirement id with no case exercising it. A case that merely mentions a requirement
    in passing does not cover it.
@@ -24,15 +26,30 @@ Do three things:
 Then write up to eight quality notes on the suite as a whole: systematic weaknesses, vague expected results,
 areas over-tested relative to their risk.`;
 
+/** Titles only: the full expected text of every case crowds out the requirements. */
 function digest(cases: TestCase[]): string {
   return cases
     .map(
       (c) =>
-        `${c.id} [${c.discipline}/${c.priority}] ${c.title} :: expects ${c.expected} :: covers ${
+        `${c.id} [${c.discipline}/${c.priority}] ${c.title} :: covers ${
           c.requirementIds.join(",") || "none"
         }`,
     )
     .join("\n");
+}
+
+/** The pairs worth adjudicating, with the detail needed to judge them. */
+function duplicateShortlist(cases: TestCase[]): string {
+  const pairs = findCandidatePairs(cases, (c) => c.title);
+  if (pairs.length === 0) {
+    return "No pairs were textually similar enough to be candidate duplicates. Return an empty duplicateIds list.";
+  }
+  return pairs
+    .map(
+      ({ a, b, score }) =>
+        `~${score.toFixed(2)} similar:\n  ${a.id} [${a.discipline}] ${a.title}\n    expects: ${a.expected}\n  ${b.id} [${b.discipline}] ${b.title}\n    expects: ${b.expected}`,
+    )
+    .join("\n\n");
 }
 
 export async function review(
@@ -48,9 +65,16 @@ export async function review(
     qualityNotes: string[];
   }>({
     system: REVIEW_SYSTEM,
-    prompt: `Requirement index (${requirements.length}):\n${requirements
-      .map((r) => `${r.id} [${r.category}] ${r.text}`)
-      .join("\n")}\n\n---\n\nTest suite (${cases.length} cases):\n${digest(cases)}`,
+    prompt: [
+      `Requirement index (${requirements.length}):`,
+      requirements.map((r) => `${r.id} [${r.category}] ${r.text}`).join("\n"),
+      "---",
+      `Candidate duplicate pairs to adjudicate:`,
+      duplicateShortlist(cases),
+      "---",
+      `Full suite for coverage and gap analysis (${cases.length} cases):`,
+      digest(cases),
+    ].join("\n\n"),
     schema: reviewSchema as unknown as Record<string, unknown>,
     onToken,
   });
