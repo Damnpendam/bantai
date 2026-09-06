@@ -1,18 +1,31 @@
 import { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type {
   AgentState,
+  Edge,
+  EdgeKind,
+  Entity,
+  EntityKind,
+  PendingFact,
+  PendingKind,
   Requirement,
   ReviewReport,
   RunMode,
   RunStatus,
+  SourceSpan,
   Stage,
+  StoredRequirement,
   TestCase,
   TestPlan,
 } from "@/lib/types";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+// Overridable so a worktree, a test, or CI can point at a throwaway database
+// instead of the working copy's real one.
+const DATA_DIR = process.env.BANTAI_DATA_DIR
+  ? path.resolve(process.env.BANTAI_DATA_DIR)
+  : path.join(process.cwd(), "data");
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // Next dev reloads modules; keep one handle on globalThis so we don't leak connections.
@@ -58,6 +71,90 @@ function getDb(): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project_id);
     CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
+
+    -- The persistent product model. Everything above is per-run and disposable;
+    -- everything below accumulates across runs and documents so a later change
+    -- can be compared against what the product already is.
+    CREATE TABLE IF NOT EXISTS entities (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      name TEXT NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS entity_aliases (
+      entity_id TEXT NOT NULL,
+      alias TEXT NOT NULL,
+      source_document_id TEXT,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (entity_id, alias)
+    );
+    -- Bi-temporal: valid_from/valid_to = true in the product; recorded_at/
+    -- superseded_at = when we learned it. A changed fact closes the old row's
+    -- validity window and links back via supersedes; it is never overwritten.
+    CREATE TABLE IF NOT EXISTS edges (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      from_entity TEXT NOT NULL,
+      to_entity TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      valid_from INTEGER NOT NULL,
+      valid_to INTEGER,
+      recorded_at INTEGER NOT NULL,
+      superseded_at INTEGER,
+      supersedes TEXT,
+      asserted_by_document TEXT,
+      confidence REAL NOT NULL DEFAULT 1.0
+    );
+    CREATE TABLE IF NOT EXISTS requirements (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      document_id TEXT,
+      run_id TEXT,
+      ref TEXT NOT NULL,
+      text TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT '',
+      valid_from INTEGER NOT NULL,
+      valid_to INTEGER,
+      recorded_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS requirement_entities (
+      requirement_id TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      PRIMARY KEY (requirement_id, entity_id)
+    );
+    CREATE TABLE IF NOT EXISTS source_spans (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      document_id TEXT NOT NULL,
+      target_kind TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      quote TEXT NOT NULL,
+      start_offset INTEGER,
+      end_offset INTEGER,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS pending_facts (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      document_id TEXT,
+      kind TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at INTEGER NOT NULL,
+      resolved_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_entities_project ON entities(project_id);
+    CREATE INDEX IF NOT EXISTS idx_edges_project ON edges(project_id);
+    CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_entity);
+    CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_entity);
+    CREATE INDEX IF NOT EXISTS idx_requirements_project ON requirements(project_id);
+    CREATE INDEX IF NOT EXISTS idx_pending_project ON pending_facts(project_id);
+    CREATE INDEX IF NOT EXISTS idx_spans_target ON source_spans(target_kind, target_id);
   `);
   migrate(db);
   g.__bantaiDb = db;
@@ -79,6 +176,85 @@ function migrate(db: DatabaseSync): void {
   if (!columns.has("mode")) {
     db.exec("ALTER TABLE runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'step'");
   }
+  backfillRequirements(db);
+}
+
+/**
+ * Requirements used to live only as a JSON blob on the run that produced them,
+ * so nothing accumulated. Copy every existing run's requirements into the
+ * project-scoped `requirements` table once.
+ *
+ * Each run that extracted requirements is treated as a re-derivation of that
+ * project's requirement set: its rows are valid from the run's creation time
+ * until the *next* such run, so `listRequirements` with the default `asOf`
+ * returns only the latest set, while an earlier `asOf` returns the set as it
+ * stood then. The blob column is left in place — the current run reader still
+ * uses it — so this changes what is *available*, not what is *used*, yet.
+ *
+ * Uses the passed handle directly: `getDb()` has not cached the connection when
+ * migrate() runs, so calling an exported helper here would re-enter it.
+ */
+function backfillRequirements(db: DatabaseSync): void {
+  const done = db
+    .prepare("SELECT value FROM settings WHERE key = 'requirements_backfilled'")
+    .get() as { value: string } | undefined;
+  if (done) return;
+
+  const runs = db
+    .prepare(
+      `SELECT id, project_id, created_at, requirements
+       FROM runs
+       WHERE requirements IS NOT NULL AND requirements != '[]'
+       ORDER BY project_id, created_at`,
+    )
+    .all() as {
+    id: string;
+    project_id: string;
+    created_at: number;
+    requirements: string;
+  }[];
+
+  const insert = db.prepare(
+    `INSERT INTO requirements
+       (id, project_id, document_id, run_id, ref, text, category, source, valid_from, valid_to, recorded_at)
+     VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  for (let i = 0; i < runs.length; i += 1) {
+    const run = runs[i];
+    const nextOnProject = runs[i + 1];
+    // Superseded by the next requirement-bearing run on the same project.
+    const validTo =
+      nextOnProject && nextOnProject.project_id === run.project_id
+        ? nextOnProject.created_at
+        : null;
+
+    let parsed: Requirement[];
+    try {
+      parsed = JSON.parse(run.requirements || "[]");
+    } catch {
+      continue; // a malformed blob is not worth aborting every other migration for
+    }
+    for (const req of parsed) {
+      if (!req || typeof req.text !== "string") continue;
+      insert.run(
+        randomUUID(),
+        run.project_id,
+        run.id,
+        typeof req.id === "string" ? req.id : "",
+        req.text,
+        typeof req.category === "string" ? req.category : "",
+        typeof req.source === "string" ? req.source : "",
+        run.created_at,
+        validTo,
+        run.created_at,
+      );
+    }
+  }
+
+  db.prepare(
+    "INSERT INTO settings (key, value) VALUES ('requirements_backfilled', ?)",
+  ).run(String(Date.now()));
 }
 
 export function getSetting(key: string): string | null {
@@ -266,4 +442,433 @@ export function updateRun(id: string, patch: RunPatch): void {
   }
   values.push(id);
   getDb().prepare(`UPDATE runs SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+}
+
+// ---------------------------------------------------------------------------
+// The persistent product model
+//
+// These reads take an `asOf` timestamp that defaults to now. With the default
+// they return the model as it currently stands; with a past timestamp they
+// return the model as it was then. That single parameter is what the later diff
+// step uses to compare "before this document" against "after".
+// ---------------------------------------------------------------------------
+
+// --- entities ---
+
+export function upsertEntity(e: {
+  id: string;
+  projectId: string;
+  kind: EntityKind;
+  name: string;
+  summary?: string;
+}): void {
+  const now = Date.now();
+  getDb()
+    .prepare(
+      `INSERT INTO entities (id, project_id, kind, name, summary, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         kind = excluded.kind,
+         name = excluded.name,
+         summary = excluded.summary,
+         updated_at = excluded.updated_at`,
+    )
+    .run(e.id, e.projectId, e.kind, e.name, e.summary ?? "", now, now);
+}
+
+export function addAlias(
+  entityId: string,
+  alias: string,
+  sourceDocumentId?: string,
+): void {
+  getDb()
+    .prepare(
+      `INSERT INTO entity_aliases (entity_id, alias, source_document_id, created_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(entity_id, alias) DO NOTHING`,
+    )
+    .run(entityId, alias, sourceDocumentId ?? null, Date.now());
+}
+
+function toEntity(row: Record<string, unknown>, aliases: string[]): Entity {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    kind: row.kind as EntityKind,
+    name: row.name as string,
+    summary: (row.summary as string) ?? "",
+    aliases,
+    createdAt: row.created_at as number,
+    updatedAt: row.updated_at as number,
+  };
+}
+
+export function getEntity(id: string): Entity | null {
+  const row = getDb().prepare("SELECT * FROM entities WHERE id = ?").get(id) as
+    | Record<string, unknown>
+    | undefined;
+  if (!row) return null;
+  const aliases = (
+    getDb()
+      .prepare("SELECT alias FROM entity_aliases WHERE entity_id = ? ORDER BY alias")
+      .all(id) as { alias: string }[]
+  ).map((r) => r.alias);
+  return toEntity(row, aliases);
+}
+
+export function listEntities(projectId: string): Entity[] {
+  const rows = getDb()
+    .prepare("SELECT * FROM entities WHERE project_id = ? ORDER BY kind, name")
+    .all(projectId) as Record<string, unknown>[];
+  const aliasRows = getDb()
+    .prepare(
+      `SELECT a.entity_id AS entity_id, a.alias AS alias
+       FROM entity_aliases a JOIN entities e ON e.id = a.entity_id
+       WHERE e.project_id = ?`,
+    )
+    .all(projectId) as { entity_id: string; alias: string }[];
+  const byEntity = new Map<string, string[]>();
+  for (const r of aliasRows) {
+    const list = byEntity.get(r.entity_id) ?? [];
+    list.push(r.alias);
+    byEntity.set(r.entity_id, list);
+  }
+  return rows.map((row) =>
+    toEntity(row, (byEntity.get(row.id as string) ?? []).sort()),
+  );
+}
+
+// --- edges (bi-temporal) ---
+
+function toEdge(row: Record<string, unknown>): Edge {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    from: row.from_entity as string,
+    to: row.to_entity as string,
+    kind: row.kind as EdgeKind,
+    validFrom: row.valid_from as number,
+    validTo: (row.valid_to as number | null) ?? null,
+    recordedAt: row.recorded_at as number,
+    supersededAt: (row.superseded_at as number | null) ?? null,
+    supersedes: (row.supersedes as string | null) ?? null,
+    assertedByDocument: (row.asserted_by_document as string | null) ?? null,
+    confidence: (row.confidence as number) ?? 1,
+  };
+}
+
+export function addEdge(e: {
+  projectId: string;
+  from: string;
+  to: string;
+  kind: EdgeKind;
+  validFrom?: number;
+  assertedByDocument?: string;
+  confidence?: number;
+  supersedes?: string;
+}): string {
+  const id = randomUUID();
+  const now = Date.now();
+  getDb()
+    .prepare(
+      `INSERT INTO edges
+         (id, project_id, from_entity, to_entity, kind, valid_from, valid_to,
+          recorded_at, superseded_at, supersedes, asserted_by_document, confidence)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      e.projectId,
+      e.from,
+      e.to,
+      e.kind,
+      e.validFrom ?? now,
+      now,
+      e.supersedes ?? null,
+      e.assertedByDocument ?? null,
+      e.confidence ?? 1,
+    );
+  return id;
+}
+
+/**
+ * Close an edge's validity window instead of deleting it. `at` is when the fact
+ * stopped being true in the product; `replacedBy` links to the edge that took
+ * its place, if any.
+ */
+export function supersedeEdge(
+  edgeId: string,
+  at: number = Date.now(),
+  replacedBy?: string,
+): void {
+  getDb()
+    .prepare(
+      "UPDATE edges SET valid_to = ?, superseded_at = ? WHERE id = ? AND valid_to IS NULL",
+    )
+    .run(at, at, edgeId);
+  if (replacedBy) {
+    getDb()
+      .prepare("UPDATE edges SET supersedes = ? WHERE id = ?")
+      .run(edgeId, replacedBy);
+  }
+}
+
+/** Edges true in the product at `asOf` (default: now). */
+export function listEdges(
+  projectId: string,
+  { asOf = Date.now() }: { asOf?: number } = {},
+): Edge[] {
+  return (
+    getDb()
+      .prepare(
+        `SELECT * FROM edges
+         WHERE project_id = ?
+           AND valid_from <= ?
+           AND (valid_to IS NULL OR valid_to > ?)
+         ORDER BY recorded_at`,
+      )
+      .all(projectId, asOf, asOf) as Record<string, unknown>[]
+  ).map(toEdge);
+}
+
+/** Every edge ever recorded for a project, including superseded ones. */
+export function listAllEdges(projectId: string): Edge[] {
+  return (
+    getDb()
+      .prepare("SELECT * FROM edges WHERE project_id = ? ORDER BY recorded_at")
+      .all(projectId) as Record<string, unknown>[]
+  ).map(toEdge);
+}
+
+export function edgesTouching(
+  entityId: string,
+  { asOf = Date.now() }: { asOf?: number } = {},
+): Edge[] {
+  return (
+    getDb()
+      .prepare(
+        `SELECT * FROM edges
+         WHERE (from_entity = ? OR to_entity = ?)
+           AND valid_from <= ?
+           AND (valid_to IS NULL OR valid_to > ?)
+         ORDER BY recorded_at`,
+      )
+      .all(entityId, entityId, asOf, asOf) as Record<string, unknown>[]
+  ).map(toEdge);
+}
+
+// --- requirements (promoted out of the run blob) ---
+
+function toStoredRequirement(row: Record<string, unknown>): StoredRequirement {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    documentId: (row.document_id as string | null) ?? null,
+    runId: (row.run_id as string | null) ?? null,
+    ref: row.ref as string,
+    text: row.text as string,
+    category: (row.category as string) ?? "",
+    source: (row.source as string) ?? "",
+    validFrom: row.valid_from as number,
+    validTo: (row.valid_to as number | null) ?? null,
+    recordedAt: row.recorded_at as number,
+  };
+}
+
+export function addRequirement(r: {
+  projectId: string;
+  ref: string;
+  text: string;
+  category?: string;
+  source?: string;
+  documentId?: string;
+  runId?: string;
+  validFrom?: number;
+}): string {
+  const id = randomUUID();
+  const now = Date.now();
+  getDb()
+    .prepare(
+      `INSERT INTO requirements
+         (id, project_id, document_id, run_id, ref, text, category, source, valid_from, valid_to, recorded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+    )
+    .run(
+      id,
+      r.projectId,
+      r.documentId ?? null,
+      r.runId ?? null,
+      r.ref,
+      r.text,
+      r.category ?? "",
+      r.source ?? "",
+      r.validFrom ?? now,
+      now,
+    );
+  return id;
+}
+
+/** Close a requirement's validity window without deleting it. */
+export function supersedeRequirement(
+  requirementId: string,
+  at: number = Date.now(),
+): void {
+  getDb()
+    .prepare(
+      "UPDATE requirements SET valid_to = ? WHERE id = ? AND valid_to IS NULL",
+    )
+    .run(at, requirementId);
+}
+
+export function listRequirements(
+  projectId: string,
+  { asOf = Date.now() }: { asOf?: number } = {},
+): StoredRequirement[] {
+  return (
+    getDb()
+      .prepare(
+        `SELECT * FROM requirements
+         WHERE project_id = ?
+           AND valid_from <= ?
+           AND (valid_to IS NULL OR valid_to > ?)
+         ORDER BY recorded_at, ref`,
+      )
+      .all(projectId, asOf, asOf) as Record<string, unknown>[]
+  ).map(toStoredRequirement);
+}
+
+export function bindRequirementEntity(
+  requirementId: string,
+  entityId: string,
+): void {
+  getDb()
+    .prepare(
+      `INSERT INTO requirement_entities (requirement_id, entity_id)
+       VALUES (?, ?) ON CONFLICT(requirement_id, entity_id) DO NOTHING`,
+    )
+    .run(requirementId, entityId);
+}
+
+// --- provenance ---
+
+export function addSourceSpan(s: {
+  projectId: string;
+  documentId: string;
+  targetKind: SourceSpan["targetKind"];
+  targetId: string;
+  quote: string;
+  startOffset?: number;
+  endOffset?: number;
+}): string {
+  const id = randomUUID();
+  getDb()
+    .prepare(
+      `INSERT INTO source_spans
+         (id, project_id, document_id, target_kind, target_id, quote, start_offset, end_offset, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      s.projectId,
+      s.documentId,
+      s.targetKind,
+      s.targetId,
+      s.quote,
+      s.startOffset ?? null,
+      s.endOffset ?? null,
+      Date.now(),
+    );
+  return id;
+}
+
+export function spansFor(
+  targetKind: SourceSpan["targetKind"],
+  targetId: string,
+): SourceSpan[] {
+  return (
+    getDb()
+      .prepare(
+        "SELECT * FROM source_spans WHERE target_kind = ? AND target_id = ? ORDER BY created_at",
+      )
+      .all(targetKind, targetId) as Record<string, unknown>[]
+  ).map((row) => ({
+    id: row.id as string,
+    projectId: row.project_id as string,
+    documentId: row.document_id as string,
+    targetKind: row.target_kind as SourceSpan["targetKind"],
+    targetId: row.target_id as string,
+    quote: row.quote as string,
+    startOffset: (row.start_offset as number | null) ?? null,
+    endOffset: (row.end_offset as number | null) ?? null,
+    createdAt: row.created_at as number,
+  }));
+}
+
+// --- the pending-facts worklist ---
+
+export function addPendingFact(p: {
+  projectId: string;
+  kind: PendingKind;
+  payload: unknown;
+  reason?: string;
+  documentId?: string;
+}): string {
+  const id = randomUUID();
+  getDb()
+    .prepare(
+      `INSERT INTO pending_facts
+         (id, project_id, document_id, kind, payload, reason, status, created_at, resolved_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'open', ?, NULL)`,
+    )
+    .run(
+      id,
+      p.projectId,
+      p.documentId ?? null,
+      p.kind,
+      JSON.stringify(p.payload ?? null),
+      p.reason ?? "",
+      Date.now(),
+    );
+  return id;
+}
+
+export function listPendingFacts(
+  projectId: string,
+  status: PendingFact["status"] | "all" = "open",
+): PendingFact[] {
+  const rows = (
+    status === "all"
+      ? getDb()
+          .prepare(
+            "SELECT * FROM pending_facts WHERE project_id = ? ORDER BY created_at DESC",
+          )
+          .all(projectId)
+      : getDb()
+          .prepare(
+            "SELECT * FROM pending_facts WHERE project_id = ? AND status = ? ORDER BY created_at DESC",
+          )
+          .all(projectId, status)
+  ) as Record<string, unknown>[];
+  return rows.map((row) => ({
+    id: row.id as string,
+    projectId: row.project_id as string,
+    documentId: (row.document_id as string | null) ?? null,
+    kind: row.kind as PendingKind,
+    payload: JSON.parse((row.payload as string) || "null"),
+    reason: (row.reason as string) ?? "",
+    status: row.status as PendingFact["status"],
+    createdAt: row.created_at as number,
+    resolvedAt: (row.resolved_at as number | null) ?? null,
+  }));
+}
+
+export function resolvePendingFact(
+  id: string,
+  status: "resolved" | "dismissed",
+): void {
+  getDb()
+    .prepare(
+      "UPDATE pending_facts SET status = ?, resolved_at = ? WHERE id = ?",
+    )
+    .run(status, Date.now(), id);
 }
