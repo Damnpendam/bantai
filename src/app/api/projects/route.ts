@@ -1,17 +1,19 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { createProject, listDocuments, listProjects, latestRun } from "@/lib/store";
+import { reconcile } from "@/lib/orchestrator";
 
 export const runtime = "nodejs";
 
 export async function GET() {
   const projects = listProjects().map((p) => {
     const run = latestRun(p.id);
+    const current = run ? reconcile(run) : null;
     return {
       ...p,
       documentCount: listDocuments(p.id).length,
-      lastRun: run
-        ? { id: run.id, status: run.status, caseCount: run.cases.length }
+      lastRun: current
+        ? { id: current.id, status: current.status, caseCount: current.cases.length }
         : null,
     };
   });

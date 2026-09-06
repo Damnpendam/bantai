@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createRun, getProject, latestRun, listDocuments } from "@/lib/store";
 import { getApiKey, getConfig } from "@/lib/settings";
 import { getProvider } from "@/lib/providers";
-import { startRun } from "@/lib/orchestrator";
+import { startRun, reconcile } from "@/lib/orchestrator";
 import { initialAgents } from "@/lib/agents/ids";
 
 export const runtime = "nodejs";
@@ -13,7 +13,8 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  return NextResponse.json({ run: latestRun(id) });
+  const run = latestRun(id);
+  return NextResponse.json({ run: run ? reconcile(run) : null });
 }
 
 export async function POST(

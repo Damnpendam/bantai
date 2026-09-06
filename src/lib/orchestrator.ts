@@ -39,6 +39,29 @@ export function isRunning(runId: string): boolean {
   return inFlight.has(runId);
 }
 
+const ACTIVE_STATUSES: RunStatus[] = ["parsing", "planning", "wave1", "wave2", "reviewing"];
+
+/**
+ * An "active" status only means something while this process is the one
+ * driving it. If the server restarted or crashed mid-stage, the row is left
+ * claiming to still be in progress forever, since nothing else will ever move
+ * it forward — the UI would just wait on a run nobody is running. Detect that
+ * on read and fail it the same way a real error would, so the existing
+ * retry-a-failed-stage path (nextStage is already pointing at the right
+ * stage) picks it up instead.
+ */
+export function reconcile(run: RunRecord): RunRecord {
+  if (!ACTIVE_STATUSES.includes(run.status) || isRunning(run.id)) return run;
+  const error = "Interrupted — the server restarted while this stage was running. Retry it.";
+  // Same cleanup drive()'s catch block does: whichever agents this stage left
+  // mid-flight are stuck "running" forever otherwise, same as the run itself.
+  new RunContext(run).failInFlight(error);
+  updateRun(run.id, { status: "failed", error });
+  emit(run.id, { type: "error", payload: error });
+  emit(run.id, { type: "status", payload: "failed" });
+  return getRun(run.id) ?? { ...run, status: "failed", error };
+}
+
 function makeLlm(maxTokens: number, signal?: AbortSignal): Llm {
   const config = getConfig();
   const apiKey = getApiKey(config.provider);

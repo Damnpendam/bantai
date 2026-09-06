@@ -139,7 +139,18 @@ export default function Home() {
         void loadProjects();
       }
     };
-    source.onerror = () => source.close();
+    source.onerror = () => {
+      source.close();
+      // The stream can die for reasons other than the run finishing — a
+      // server restart, a network blip. Resync from the source of truth
+      // instead of leaving whatever was last on screen frozen there forever.
+      void fetch(`/api/runs/${runId}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((body: { run?: RunView } | null) => {
+          if (body?.run) setRun(body.run);
+        })
+        .catch(() => {});
+    };
   }, [loadProjects]);
 
   // Reattach to whatever the selected project was last doing.

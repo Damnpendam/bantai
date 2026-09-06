@@ -1,5 +1,6 @@
 import { subscribe } from "@/lib/events";
 import { getRun } from "@/lib/store";
+import { reconcile } from "@/lib/orchestrator";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,9 +10,13 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  if (!getRun(id)) {
+  const run = getRun(id);
+  if (!run) {
     return new Response("No such run.", { status: 404 });
   }
+  // A client reconnecting to a run orphaned by a server restart should learn
+  // that immediately rather than sit on an open stream that will never emit.
+  reconcile(run);
 
   const encoder = new TextEncoder();
 
