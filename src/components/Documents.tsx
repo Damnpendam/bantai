@@ -19,9 +19,12 @@ function humanBytes(n: number): string {
 export function Documents({
   projectId,
   onChange,
+  locked,
 }: {
   projectId: string;
   onChange: (count: number) => void;
+  /** True while a run for this project is actively executing a stage. */
+  locked?: boolean;
 }) {
   const [docs, setDocs] = useState<Doc[]>([]);
   const [busy, setBusy] = useState(false);
@@ -42,22 +45,31 @@ export function Documents({
     void load();
   }, [load]);
 
+  // A run may start (in another tab, or between render and click) after this
+  // was disabled client-side — the server enforces the same rule, so surface
+  // its refusal the same way an upload/parse failure would show up.
   async function upload(files: FileList | File[]) {
-    if (files.length === 0) return;
+    if (files.length === 0 || locked) return;
     setBusy(true);
     setProblems([]);
     const form = new FormData();
     for (const file of Array.from(files)) form.append("files", file);
-    const result = await fetch(`/api/projects/${projectId}/documents`, {
+    const response = await fetch(`/api/projects/${projectId}/documents`, {
       method: "POST",
       body: form,
-    }).then((r) => r.json());
+    });
+    const result = await response.json().catch(() => ({}));
     setBusy(false);
+    if (!response.ok) {
+      setProblems([{ name: "Upload", reason: result.error ?? "The upload was rejected." }]);
+      return;
+    }
     if (result.failed?.length) setProblems(result.failed);
     await load();
   }
 
   async function remove(id: string) {
+    if (locked) return;
     // Extracted text is not recoverable once the row is gone, and the upload took
     // real effort — never delete on a single click.
     if (confirming !== id) {
@@ -65,7 +77,15 @@ export function Documents({
       return;
     }
     setConfirming(null);
-    await fetch(`/api/documents/${id}`, { method: "DELETE" });
+    const doc = docs.find((d) => d.id === id);
+    const response = await fetch(`/api/documents/${id}`, { method: "DELETE" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      setProblems([
+        { name: doc?.name ?? "Remove", reason: body.error ?? "Could not remove it." },
+      ]);
+      return;
+    }
     await load();
   }
 
@@ -75,7 +95,11 @@ export function Documents({
         title="Requirement documents"
         hint="pdf, docx, md, txt, csv, json, yaml, html"
         action={
-          <Button size="sm" onClick={() => inputRef.current?.click()} disabled={busy}>
+          <Button
+            size="sm"
+            onClick={() => inputRef.current?.click()}
+            disabled={busy || locked}
+          >
             {busy ? <Spinner /> : null} Add
           </Button>
         }
@@ -85,24 +109,31 @@ export function Documents({
         type="file"
         multiple
         className="hidden"
+        disabled={locked}
         onChange={(e) => {
           if (e.target.files) void upload(e.target.files);
           e.target.value = "";
         }}
       />
 
+      {locked ? (
+        <p className="border-b border-line bg-canvas px-4 py-2 text-xs text-ink-faint">
+          A run is in progress — cancel it to add or remove documents.
+        </p>
+      ) : null}
+
       <div
         onDragOver={(e) => {
           e.preventDefault();
-          setDragging(true);
+          if (!locked) setDragging(true);
         }}
         onDragLeave={() => setDragging(false)}
         onDrop={(e) => {
           e.preventDefault();
           setDragging(false);
-          void upload(e.dataTransfer.files);
+          if (!locked) void upload(e.dataTransfer.files);
         }}
-        className={`px-4 py-3 ${dragging ? "bg-accent-soft" : ""}`}
+        className={`px-4 py-3 ${dragging && !locked ? "bg-accent-soft" : ""}`}
       >
         {docs.length === 0 ? (
           <p className="py-6 text-center text-sm text-ink-faint">
@@ -124,6 +155,7 @@ export function Documents({
                   variant={confirming === doc.id ? "primary" : "ghost"}
                   onClick={() => void remove(doc.id)}
                   onBlur={() => setConfirming((c) => (c === doc.id ? null : c))}
+                  disabled={locked}
                   aria-label={
                     confirming === doc.id
                       ? `Confirm removing ${doc.name}`

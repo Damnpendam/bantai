@@ -8,6 +8,7 @@ import { review } from "@/lib/agents/reviewer";
 import { emit } from "@/lib/events";
 import { listDocuments, getRun, updateRun, type RunRecord } from "@/lib/store";
 import {
+  isActiveRun,
   nextAfter,
   type AgentId,
   type AgentState,
@@ -39,8 +40,6 @@ export function isRunning(runId: string): boolean {
   return inFlight.has(runId);
 }
 
-const ACTIVE_STATUSES: RunStatus[] = ["parsing", "planning", "wave1", "wave2", "reviewing"];
-
 /**
  * An "active" status only means something while this process is the one
  * driving it. If the server restarted or crashed mid-stage, the row is left
@@ -51,7 +50,7 @@ const ACTIVE_STATUSES: RunStatus[] = ["parsing", "planning", "wave1", "wave2", "
  * stage) picks it up instead.
  */
 export function reconcile(run: RunRecord): RunRecord {
-  if (!ACTIVE_STATUSES.includes(run.status) || isRunning(run.id)) return run;
+  if (!isActiveRun(run.status) || isRunning(run.id)) return run;
   const error = "Interrupted — the server restarted while this stage was running. Retry it.";
   // Same cleanup drive()'s catch block does: whichever agents this stage left
   // mid-flight are stuck "running" forever otherwise, same as the run itself.
@@ -373,8 +372,20 @@ async function drive(runId: string, mode: RunMode): Promise<void> {
       const stage = run.nextStage;
       await runStage(run, stage, controller.signal);
 
+      // A wave or the reviewer absorbs a cancelled agent as a per-agent
+      // failure rather than throwing, so runStage can return normally even
+      // after cancelRun() fired mid-stage. Without this check we'd advance
+      // nextStage past the very stage that got cut short, silently undoing
+      // the cancel endpoint's nextStage: null and offering to "resume" a
+      // stage that never actually finished.
+      if (controller.signal.aborted) return;
+
       const following = nextAfter(stage);
       updateRun(runId, { nextStage: following });
+      // Persisting it is not enough — a client already attached to this run's
+      // stream never re-fetches, so without this its pause banner keeps
+      // naming the stage that just finished instead of the one coming up.
+      emit(runId, { type: "nextStage", payload: following });
 
       if (!following) {
         updateRun(runId, { status: "done" });

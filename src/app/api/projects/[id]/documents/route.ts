@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import { addDocument, getProject, listDocuments } from "@/lib/store";
+import { addDocument, getProject, latestRun, listDocuments } from "@/lib/store";
 import { parseDocument } from "@/lib/parse";
+import { isActiveRun } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -26,6 +27,13 @@ export async function POST(
   const { id } = await params;
   if (!getProject(id)) {
     return NextResponse.json({ error: "No such project." }, { status: 404 });
+  }
+  const run = latestRun(id);
+  if (run && isActiveRun(run.status)) {
+    return NextResponse.json(
+      { error: "A run is in progress. Cancel it before adding documents." },
+      { status: 409 },
+    );
   }
 
   const form = await request.formData();

@@ -14,7 +14,11 @@ export async function POST(
   if (!run) {
     return NextResponse.json({ error: "No such run." }, { status: 404 });
   }
-  if (run.status === "done" || run.status === "failed") {
+  // A failed run with a nextStage is still "abandon-able" — that's exactly
+  // what the Abandon button sends here. Only a run with nothing left to give
+  // up (done, or already abandoned) is truly a no-op.
+  const nothingToStop = run.status === "done" || (run.status === "failed" && !run.nextStage);
+  if (nothingToStop) {
     return NextResponse.json({ stopped: false, reason: `already ${run.status}` });
   }
 
@@ -23,6 +27,7 @@ export async function POST(
   cancelRun(id);
   updateRun(id, { status: "failed", error: "Cancelled.", nextStage: null });
   emit(id, { type: "status", payload: "failed" });
+  emit(id, { type: "nextStage", payload: null });
   emit(id, { type: "log", payload: "Run cancelled." });
 
   return NextResponse.json({ stopped: true });

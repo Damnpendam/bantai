@@ -1,12 +1,22 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import { createRun, getProject, latestRun, listDocuments } from "@/lib/store";
+import { createRun, getProject, latestRun, listDocuments, type RunRecord } from "@/lib/store";
 import { getApiKey, getConfig } from "@/lib/settings";
 import { getProvider } from "@/lib/providers";
 import { startRun, reconcile } from "@/lib/orchestrator";
 import { initialAgents } from "@/lib/agents/ids";
+import { isActiveRun } from "@/lib/types";
 
 export const runtime = "nodejs";
+
+/** Mirrors the frontend's own running/resumable gate on the "start" button. */
+function hasUnfinishedRun(run: RunRecord): boolean {
+  return (
+    isActiveRun(run.status) ||
+    run.status === "paused" ||
+    (run.status === "failed" && Boolean(run.nextStage))
+  );
+}
 
 export async function GET(
   _request: Request,
@@ -38,6 +48,17 @@ export async function POST(
     return NextResponse.json(
       { error: "Upload at least one requirement document first." },
       { status: 400 },
+    );
+  }
+  const existing = latestRun(id);
+  const current = existing ? reconcile(existing) : null;
+  if (current && hasUnfinishedRun(current)) {
+    return NextResponse.json(
+      {
+        error:
+          "This project already has a run in progress or waiting on you. Finish or cancel it before starting another.",
+      },
+      { status: 409 },
     );
   }
 

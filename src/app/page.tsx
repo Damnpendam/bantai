@@ -8,6 +8,7 @@ import { Settings, type SettingsState } from "@/components/Settings";
 import { Gate, PlanPanel } from "@/components/Plan";
 import { Badge, Button, Card, CardHead, Metric, Spinner } from "@/components/ui";
 import { initialAgents } from "@/lib/agents/ids";
+import { isActiveRun } from "@/lib/types";
 import type {
   AgentState,
   Requirement,
@@ -39,8 +40,6 @@ interface RunView {
   nextStage: Stage | null;
   mode: RunMode;
 }
-
-const ACTIVE: RunStatus[] = ["parsing", "planning", "wave1", "wave2", "reviewing"];
 
 const STATUS_COPY: Record<RunStatus, string> = {
   idle: "idle",
@@ -74,10 +73,11 @@ export default function Home() {
   const [advancing, setAdvancing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
+  const [creating, setCreating] = useState(false);
   const sourceRef = useRef<EventSource | null>(null);
 
   const active = projects.find((p) => p.id === activeId) ?? null;
-  const running = run ? ACTIVE.includes(run.status) : false;
+  const running = run ? isActiveRun(run.status) : false;
   const activeProvider =
     settings?.providers.find((p) => p.id === settings.provider) ?? null;
   const paused = run?.status === "paused";
@@ -118,6 +118,8 @@ export default function Home() {
             return { ...current, cases: [...current.cases, ...(event.payload as TestCase[])] };
           case "review":
             return { ...current, review: event.payload as ReviewReport };
+          case "nextStage":
+            return { ...current, nextStage: event.payload as Stage | null };
           case "agent": {
             const agent = event.payload as AgentState;
             return {
@@ -169,22 +171,35 @@ export default function Home() {
           return;
         }
         setRun(existing as RunView);
-        if (ACTIVE.includes(existing.status)) attach(existing.id);
+        if (isActiveRun(existing.status)) attach(existing.id);
       });
     return () => sourceRef.current?.close();
   }, [activeId, attach]);
 
   async function createProject() {
     const name = newName.trim();
-    if (!name) return;
-    const { project } = await fetch("/api/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    }).then((r) => r.json());
-    setNewName("");
-    await loadProjects();
-    setActiveId(project.id);
+    if (!name || creating) return;
+    setCreating(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body.project) {
+        setNotice(body.error ?? "Could not create the project.");
+        return;
+      }
+      setNewName("");
+      await loadProjects();
+      setActiveId(body.project.id);
+    } catch {
+      setNotice("Could not reach the server. Check it's still running and try again.");
+    } finally {
+      setCreating(false);
+    }
   }
 
   async function start() {
@@ -235,6 +250,13 @@ export default function Home() {
   async function cancel() {
     if (!run) return;
     await fetch(`/api/runs/${run.id}/cancel`, { method: "POST" });
+    // The live stream only exists while a stage is actively running — cancel
+    // from a paused or already-failed run (Abandon) has no listener to tell,
+    // so pull the outcome directly rather than leaving stale state on screen.
+    const body = await fetch(`/api/runs/${run.id}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+    if (body?.run) setRun(body.run);
   }
 
   function applyVerdict(id: string, verdict: "approved" | "rejected" | null) {
@@ -280,11 +302,12 @@ export default function Home() {
             onKeyDown={(e) => {
               if (e.key === "Enter") void createProject();
             }}
+            disabled={creating}
             placeholder="New project…"
             className="w-40 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-sm outline-none focus:ring-2 focus:ring-accent/40"
           />
-          <Button size="sm" onClick={() => void createProject()} disabled={!newName.trim()}>
-            Create
+          <Button size="sm" onClick={() => void createProject()} disabled={!newName.trim() || creating}>
+            {creating ? <Spinner /> : null} Create
           </Button>
           <Button size="sm" variant="ghost" onClick={() => setSettingsOpen(true)}>
             {activeProvider?.hasKey ? "Settings" : "Add API key"}
@@ -299,6 +322,13 @@ export default function Home() {
         </p>
       ) : null}
 
+      {/* Once a project is active, this same notice surfaces inside its Card
+          instead — this covers the one case that has no Card yet: creating
+          the very first project failing silently otherwise. */}
+      {!active && notice ? (
+        <p className="mt-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600">{notice}</p>
+      ) : null}
+
       {!active ? (
         <div className="mt-16 text-center">
           <h2 className="text-base font-medium">Start with a project</h2>
@@ -310,7 +340,7 @@ export default function Home() {
       ) : (
         <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,340px)_minmax(0,1fr)]">
           <div className="space-y-5">
-            <Documents projectId={active.id} onChange={setDocCount} />
+            <Documents projectId={active.id} onChange={setDocCount} locked={running} />
 
             <Card>
               <CardHead

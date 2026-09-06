@@ -25,6 +25,25 @@ export type RunStatus =
   | "done"
   | "failed";
 
+/** Statuses that mean a stage is actually executing right now, server-side. */
+const ACTIVE_RUN_STATUSES: RunStatus[] = [
+  "parsing",
+  "planning",
+  "wave1",
+  "wave2",
+  "reviewing",
+];
+
+/**
+ * True only while some process is genuinely driving this run — as opposed to
+ * paused (waiting on a person), or a terminal state. Shared by the client
+ * (to grey out controls) and the server (to reject changes, like editing
+ * documents, that would be unsafe mid-stage).
+ */
+export function isActiveRun(status: RunStatus): boolean {
+  return ACTIVE_RUN_STATUSES.includes(status);
+}
+
 /** A run executes one stage per invocation so it can pause between them. */
 export type Stage = "requirements" | "plan" | "wave1" | "wave2" | "review";
 
@@ -116,6 +135,7 @@ export interface RunEvent {
     | "review"
     | "log"
     | "error"
-    | "done";
+    | "done"
+    | "nextStage";
   payload: unknown;
 }

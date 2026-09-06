@@ -165,6 +165,14 @@ export function listDocuments(projectId: string): DocumentRow[] {
     .all(projectId) as unknown as DocumentRow[];
 }
 
+export function getDocument(id: string): DocumentRow | null {
+  return (
+    (getDb().prepare("SELECT * FROM documents WHERE id = ?").get(id) as
+      | DocumentRow
+      | undefined) ?? null
+  );
+}
+
 export function deleteDocument(id: string): void {
   getDb().prepare("DELETE FROM documents WHERE id = ?").run(id);
 }
