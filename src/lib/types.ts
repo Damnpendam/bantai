@@ -136,6 +136,7 @@ export interface RunEvent {
     | "log"
     | "error"
     | "done"
-    | "nextStage";
+    | "nextStage"
+    | "casesRemoved";
   payload: unknown;
 }

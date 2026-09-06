@@ -108,14 +108,24 @@ export default function Home() {
       setRun((current) => {
         if (!current) return current;
         switch (event.type) {
-          case "status":
-            return { ...current, status: event.payload as RunStatus };
+          case "status": {
+            const status = event.payload as RunStatus;
+            // A retried stage starting (or finishing) proves whatever error
+            // was on screen no longer applies. Leave it alone on a genuine
+            // failure — the "error" event already set the new message, and
+            // this "status": "failed" is just its usual, redundant follow-up.
+            return { ...current, status, error: status === "failed" ? current.error : null };
+          }
           case "requirements":
             return { ...current, requirements: event.payload as Requirement[] };
           case "plan":
             return { ...current, plan: event.payload as TestPlan };
           case "cases":
             return { ...current, cases: [...current.cases, ...(event.payload as TestCase[])] };
+          case "casesRemoved": {
+            const removed = new Set(event.payload as string[]);
+            return { ...current, cases: current.cases.filter((c) => !removed.has(c.id)) };
+          }
           case "review":
             return { ...current, review: event.payload as ReviewReport };
           case "nextStage":

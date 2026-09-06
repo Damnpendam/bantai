@@ -239,6 +239,10 @@ async function runReviewStage(
   if (report.duplicatesRemoved.length > 0) {
     const dropped = new Set(report.duplicatesRemoved);
     ctx.replaceCases(ctx.all.filter((c) => !dropped.has(c.id)));
+    // replaceCases only persists — a client already attached to this run's
+    // stream keeps appending cases and never learns any were dropped, so its
+    // count and list run ahead of what actually got kept.
+    emit(ctx.runId, { type: "casesRemoved", payload: report.duplicatesRemoved });
     for (const spec of AGENTS) {
       ctx.agent(spec.id, { caseCount: ctx.countFor(spec.id) });
     }
