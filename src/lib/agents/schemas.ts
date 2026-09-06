@@ -171,6 +171,132 @@ export const casesSchema = {
   },
 } as const;
 
+const ENTITY_KIND = {
+  type: "string",
+  enum: [
+    "capability",
+    "screen",
+    "actor",
+    "data_object",
+    "state",
+    "rule",
+    "event",
+    "constraint",
+  ],
+} as const;
+
+const EDGE_KIND = {
+  type: "string",
+  enum: ["governs", "mutates", "precedes", "requires", "belongs_to", "contradicts"],
+} as const;
+
+export const extractionSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["entities", "edges"],
+  properties: {
+    entities: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["ref", "kind", "name", "summary", "quotes"],
+        properties: {
+          ref: {
+            type: "string",
+            description:
+              "A short document-local handle like E1, E2, E3 — used only to wire up the edges below.",
+          },
+          kind: ENTITY_KIND,
+          name: {
+            type: "string",
+            description:
+              "The product's own name for this thing. Prefer the exact term the document uses.",
+          },
+          summary: {
+            type: "string",
+            description: "One sentence: what this is and what it is for.",
+          },
+          quotes: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "One to three verbatim spans from the document that assert this entity exists.",
+          },
+        },
+      },
+    },
+    edges: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["from", "to", "kind", "quote", "confidence"],
+        properties: {
+          from: {
+            type: "string",
+            description: "The `ref` of the source entity (E1, E2, …).",
+          },
+          to: {
+            type: "string",
+            description: "The `ref` of the target entity.",
+          },
+          kind: EDGE_KIND,
+          quote: {
+            type: "string",
+            description:
+              "A verbatim span from the document that states this relationship.",
+          },
+          confidence: {
+            type: "number",
+            description:
+              "How firmly the document states this, 0 to 1. Explicit statement ~1.0; reasonable inference ~0.6; a guess ~0.3.",
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+export const resolutionSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["decisions"],
+  properties: {
+    decisions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["ref", "verdict", "reason"],
+        properties: {
+          ref: { type: "string", description: "The extracted entity's ref." },
+          verdict: {
+            type: "string",
+            enum: ["match", "new", "ambiguous"],
+            description:
+              "match: it is one of the candidates. new: none of the candidates is the same thing. ambiguous: cannot tell from the evidence given.",
+          },
+          entityId: {
+            type: "string",
+            description: "When verdict is match: the id of the candidate it matches.",
+          },
+          candidateIds: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "When verdict is ambiguous: the candidate ids that could each plausibly be it.",
+          },
+          reason: {
+            type: "string",
+            description: "One sentence justifying the verdict.",
+          },
+        },
+      },
+    },
+  },
+} as const;
+
 export const reviewSchema = {
   type: "object",
   additionalProperties: false,

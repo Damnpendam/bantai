@@ -1,6 +1,5 @@
-import { Llm } from "@/lib/llm";
-import { getApiKey, getConfig } from "@/lib/settings";
-import { getProvider } from "@/lib/providers";
+import { getConfig } from "@/lib/settings";
+import { makeLlm } from "@/lib/llm-config";
 import { AGENTS, WAVE1, WAVE2, type AgentSpec } from "@/lib/agents/roster";
 import { buildPlan, extractRequirements } from "@/lib/agents/planner";
 import { writeSuite } from "@/lib/agents/writer";
@@ -59,17 +58,6 @@ export function reconcile(run: RunRecord): RunRecord {
   emit(run.id, { type: "error", payload: error });
   emit(run.id, { type: "status", payload: "failed" });
   return getRun(run.id) ?? { ...run, status: "failed", error };
-}
-
-function makeLlm(maxTokens: number, signal?: AbortSignal): Llm {
-  const config = getConfig();
-  const apiKey = getApiKey(config.provider);
-  if (!apiKey) {
-    throw new Error(
-      `No ${getProvider(config.provider).label} API key configured. Add one in settings.`,
-    );
-  }
-  return new Llm({ ...config, apiKey, maxTokens, signal });
 }
 
 const STATUS_FOR: Record<Stage, RunStatus> = {

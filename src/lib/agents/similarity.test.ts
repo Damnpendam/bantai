@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findCandidatePairs, similarity } from "./similarity.ts";
+import { crossCandidates, findCandidatePairs, similarity } from "./similarity.ts";
 
 test("scores identical text as 1 and unrelated text near 0", () => {
   assert.equal(similarity("add item to cart", "add item to cart"), 1);
@@ -55,5 +55,59 @@ test("caps how many pairs it returns, strongest first", () => {
   assert.equal(pairs.length, 10);
   for (let i = 1; i < pairs.length; i += 1) {
     assert.ok(pairs[i - 1].score >= pairs[i].score);
+  }
+});
+
+test("crossCandidates blocks each new name against similar existing ones only", () => {
+  const fresh = [
+    { name: "promo code" },
+    { name: "gift card" },
+    { name: "brand-new widget" },
+  ];
+  const existing = [
+    { name: "promo codes" },
+    { name: "promotional code" },
+    { name: "shopping cart" },
+  ];
+  const matches = crossCandidates(
+    fresh,
+    existing,
+    (f) => f.name,
+    (e) => e.name,
+  );
+
+  const forPromo = matches.filter((m) => m.left.name === "promo code");
+  assert.deepEqual(
+    forPromo.map((m) => m.right.name).sort(),
+    ["promo codes", "promotional code"],
+    "the two promo-ish existing names are candidates",
+  );
+  assert.equal(
+    matches.some((m) => m.left.name === "brand-new widget"),
+    false,
+    "a genuinely new name has no candidates",
+  );
+  assert.equal(
+    matches.some((m) => m.right.name === "shopping cart"),
+    false,
+    "an unrelated existing name is never a candidate",
+  );
+});
+
+test("crossCandidates keeps at most perLeft candidates, strongest first", () => {
+  const fresh = [{ name: "user account" }];
+  const existing = Array.from({ length: 12 }, (_, i) => ({
+    name: `user account ${i}`,
+  }));
+  const matches = crossCandidates(
+    fresh,
+    existing,
+    (f) => f.name,
+    (e) => e.name,
+    { perLeft: 3 },
+  );
+  assert.equal(matches.length, 3);
+  for (let i = 1; i < matches.length; i += 1) {
+    assert.ok(matches[i - 1].score >= matches[i].score);
   }
 });

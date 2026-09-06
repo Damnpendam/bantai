@@ -148,6 +148,14 @@ function getDb(): DatabaseSync {
       created_at INTEGER NOT NULL,
       resolved_at INTEGER
     );
+    CREATE TABLE IF NOT EXISTS document_ingests (
+      document_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      ingested_at INTEGER NOT NULL,
+      entity_count INTEGER NOT NULL,
+      edge_count INTEGER NOT NULL,
+      pending_count INTEGER NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_entities_project ON entities(project_id);
     CREATE INDEX IF NOT EXISTS idx_edges_project ON edges(project_id);
     CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_entity);
@@ -657,6 +665,78 @@ export function edgesTouching(
   ).map(toEdge);
 }
 
+/** A currently-valid edge with these exact endpoints and kind, if one exists. */
+export function findLiveEdge(
+  projectId: string,
+  from: string,
+  to: string,
+  kind: EdgeKind,
+): Edge | null {
+  const row = getDb()
+    .prepare(
+      `SELECT * FROM edges
+       WHERE project_id = ? AND from_entity = ? AND to_entity = ? AND kind = ?
+         AND valid_to IS NULL
+       LIMIT 1`,
+    )
+    .get(projectId, from, to, kind) as Record<string, unknown> | undefined;
+  return row ? toEdge(row) : null;
+}
+
+// --- ingestion bookkeeping ---
+
+export interface DocumentIngest {
+  documentId: string;
+  projectId: string;
+  ingestedAt: number;
+  entityCount: number;
+  edgeCount: number;
+  pendingCount: number;
+}
+
+export function getDocumentIngest(documentId: string): DocumentIngest | null {
+  const row = getDb()
+    .prepare("SELECT * FROM document_ingests WHERE document_id = ?")
+    .get(documentId) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    documentId: row.document_id as string,
+    projectId: row.project_id as string,
+    ingestedAt: row.ingested_at as number,
+    entityCount: row.entity_count as number,
+    edgeCount: row.edge_count as number,
+    pendingCount: row.pending_count as number,
+  };
+}
+
+export function markDocumentIngested(i: Omit<DocumentIngest, "ingestedAt">): void {
+  getDb()
+    .prepare(
+      `INSERT INTO document_ingests
+         (document_id, project_id, ingested_at, entity_count, edge_count, pending_count)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(document_id) DO UPDATE SET
+         ingested_at = excluded.ingested_at,
+         entity_count = excluded.entity_count,
+         edge_count = excluded.edge_count,
+         pending_count = excluded.pending_count`,
+    )
+    .run(
+      i.documentId,
+      i.projectId,
+      Date.now(),
+      i.entityCount,
+      i.edgeCount,
+      i.pendingCount,
+    );
+}
+
+export function clearDocumentIngest(documentId: string): void {
+  getDb()
+    .prepare("DELETE FROM document_ingests WHERE document_id = ?")
+    .run(documentId);
+}
+
 // --- requirements (promoted out of the run blob) ---
 
 function toStoredRequirement(row: Record<string, unknown>): StoredRequirement {
@@ -871,4 +951,17 @@ export function resolvePendingFact(
       "UPDATE pending_facts SET status = ?, resolved_at = ? WHERE id = ?",
     )
     .run(status, Date.now(), id);
+}
+
+/**
+ * Drop every open pending fact derived from one document. Used when that
+ * document is re-ingested, so the worklist reflects the latest parse rather
+ * than accumulating a copy per run.
+ */
+export function clearPendingFactsForDocument(documentId: string): void {
+  getDb()
+    .prepare(
+      "DELETE FROM pending_facts WHERE document_id = ? AND status = 'open'",
+    )
+    .run(documentId);
 }

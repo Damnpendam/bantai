@@ -198,6 +198,48 @@ export interface SourceSpan {
   createdAt: number;
 }
 
+// --- extraction: what the model returns for one document, before it is
+//     resolved against the model that already exists and written to the store ---
+
+export interface ExtractedEntity {
+  /** Document-local handle ("E1", "E2", …) used to wire this doc's edges. */
+  ref: string;
+  kind: EntityKind;
+  name: string;
+  summary: string;
+  /** Verbatim source spans that assert this entity. */
+  quotes: string[];
+}
+
+export interface ExtractedEdge {
+  /** An entity `ref` from the same extraction, or a bare name. */
+  from: string;
+  to: string;
+  kind: EdgeKind;
+  quote: string;
+  /** The model's own confidence in the relationship, 0–1. */
+  confidence: number;
+}
+
+export interface ExtractionResult {
+  entities: ExtractedEntity[];
+  edges: ExtractedEdge[];
+}
+
+/**
+ * One resolution verdict: does this freshly extracted entity correspond to an
+ * entity already in the model, is it new, or is it too close to call?
+ */
+export interface ResolutionDecision {
+  ref: string;
+  verdict: "match" | "new" | "ambiguous";
+  /** Set when verdict is "match". */
+  entityId?: string;
+  /** Candidate ids when verdict is "ambiguous". */
+  candidateIds?: string[];
+  reason: string;
+}
+
 export interface SuiteBrief {
   discipline: Discipline;
   focus: string;

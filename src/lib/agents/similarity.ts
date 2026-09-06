@@ -68,3 +68,44 @@ export function findCandidatePairs<T>(
 
   return pairs.sort((x, y) => y.score - x.score).slice(0, limit);
 }
+
+export interface CrossMatch<L, R> {
+  left: L;
+  right: R;
+  score: number;
+}
+
+/**
+ * For each item in `left`, the items in `right` whose text is similar enough to
+ * be worth a closer look — the blocking step for resolving freshly extracted
+ * entities against the ones already in the model. Same rationale as
+ * findCandidatePairs: generous, and a model makes the final call.
+ */
+export function crossCandidates<L, R>(
+  left: L[],
+  right: R[],
+  textOfLeft: (item: L) => string,
+  textOfRight: (item: R) => string,
+  { threshold = 0.4, perLeft = 5 }: { threshold?: number; perLeft?: number } = {},
+): CrossMatch<L, R>[] {
+  const rightGrams = right.map(textOfRight).map(trigrams);
+  const out: CrossMatch<L, R>[] = [];
+
+  for (const l of left) {
+    const lg = trigrams(textOfLeft(l));
+    if (lg.size === 0) continue;
+    const scored: CrossMatch<L, R>[] = [];
+    for (let j = 0; j < right.length; j += 1) {
+      const rg = rightGrams[j];
+      if (rg.size === 0) continue;
+      let shared = 0;
+      for (const gram of lg) if (rg.has(gram)) shared += 1;
+      const score = shared / (lg.size + rg.size - shared);
+      if (score >= threshold) scored.push({ left: l, right: right[j], score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    out.push(...scored.slice(0, perLeft));
+  }
+
+  return out;
+}
