@@ -15,14 +15,17 @@ import {
   findLiveEdge,
   getDocument,
   getDocumentIngest,
+  listAllEdges,
   listDocuments,
   listEntities,
   markDocumentIngested,
+  supersedeEdge,
   upsertEntity,
   type DocumentRow,
 } from "./store.ts";
 import type {
   Entity,
+  EdgeKind,
   ExtractedEdge,
   ExtractedEntity,
   ResolutionDecision,
@@ -30,6 +33,12 @@ import type {
 
 /** An edge the model was not sure about is not worth trusting in canon. */
 const MIN_EDGE_CONFIDENCE = 0.5;
+
+export interface EdgeRef {
+  from: string;
+  to: string;
+  kind: EdgeKind;
+}
 
 export interface IngestSummary {
   documentId: string;
@@ -41,6 +50,12 @@ export interface IngestSummary {
   edgesAdded: number;
   edgesDuplicate: number;
   edgesPending: number;
+  /** Edges added because this document now asserts them. */
+  addedEdges: EdgeRef[];
+  /** Edges retired because this document no longer asserts them (forced re-ingest). */
+  supersededEdges: EdgeRef[];
+  /** Entities this ingest created or newly connected — the seeds for impact. */
+  changedEntityIds: string[];
 }
 
 function nameKey(s: string): string {
@@ -81,7 +96,11 @@ async function ingestOne(
     edgesAdded: 0,
     edgesDuplicate: 0,
     edgesPending: 0,
+    addedEdges: [],
+    supersededEdges: [],
+    changedEntityIds: [],
   };
+  const changed = new Set<string>();
 
   if (getDocumentIngest(document.id) && !force) {
     return { ...base, skipped: true };
@@ -136,6 +155,7 @@ async function ingestOne(
         addAlias(decision.entityId, entity.name, document.id);
       }
       recordEntitySpans(projectId, document.id, decision.entityId, entity);
+      // A match with no new edges is not a change; edges below add their endpoints.
       continue;
     }
 
@@ -166,8 +186,17 @@ async function ingestOne(
     });
     refToId.set(entity.ref, id);
     base.entitiesCreated += 1;
+    changed.add(id);
     recordEntitySpans(projectId, document.id, id, entity);
   }
+
+  // Live edges this same document asserted on a previous ingest. Any it no
+  // longer produces this time are retired below — that is the mechanical half
+  // of "what changed": the document stopped saying something.
+  const priorDocEdges = listAllEdges(projectId).filter(
+    (e) => e.assertedByDocument === document.id && e.validTo === null,
+  );
+  const assertedNow = new Set<string>();
 
   // Pass 2: edges.
   for (const edge of extraction.edges) {
@@ -204,6 +233,11 @@ async function ingestOne(
     const existing = findLiveEdge(projectId, from, to, edge.kind);
     if (existing) {
       base.edgesDuplicate += 1;
+      // Only this document's own prior assertion counts as "still asserted";
+      // an identical edge from another document is a separate fact.
+      if (existing.assertedByDocument === document.id) {
+        assertedNow.add(existing.id);
+      }
       if (edge.quote) {
         addSourceSpan({
           projectId,
@@ -224,7 +258,11 @@ async function ingestOne(
       assertedByDocument: document.id,
       confidence: edge.confidence,
     });
+    assertedNow.add(id);
     base.edgesAdded += 1;
+    base.addedEdges.push({ from, to, kind: edge.kind });
+    changed.add(from);
+    changed.add(to);
     if (edge.quote) {
       addSourceSpan({
         projectId,
@@ -235,6 +273,21 @@ async function ingestOne(
       });
     }
   }
+
+  // Retire what this document used to assert and no longer does.
+  for (const prior of priorDocEdges) {
+    if (assertedNow.has(prior.id)) continue;
+    supersedeEdge(prior.id);
+    base.supersededEdges.push({
+      from: prior.from,
+      to: prior.to,
+      kind: prior.kind,
+    });
+    changed.add(prior.from);
+    changed.add(prior.to);
+  }
+
+  base.changedEntityIds = [...changed];
 
   markDocumentIngested({
     documentId: document.id,

@@ -27,6 +27,25 @@ function fixedExtraction(result: unknown) {
   };
 }
 
+/** Returns queued responses in order — one per json() call. */
+function queuedLlm(responses: unknown[]) {
+  const calls: { system: string }[] = [];
+  const llm = {
+    async json(args: { system: string }) {
+      calls.push({ system: args.system });
+      const r = responses[calls.length - 1];
+      if (r === undefined) {
+        throw new Error(`queuedLlm: no response for call ${calls.length}`);
+      }
+      return r;
+    },
+  };
+  return {
+    llm: llm as unknown as NonNullable<Parameters<typeof ingestDocument>[1]>["llm"],
+    calls,
+  };
+}
+
 const EXTRACTION = {
   entities: [
     {
@@ -159,4 +178,68 @@ test("re-ingesting the same document is stable: nothing new is created", async (
     1,
     "the pending queue did not grow",
   );
+});
+
+test("a changed document retires what it no longer says and adds what it now says", async () => {
+  const { projectId, documentId } = seedDocument();
+
+  // v2 keeps Promo -> Checkout, drops Checkout -> Order, and introduces a
+  // Gift card rule that also governs Checkout.
+  const V2 = {
+    entities: [
+      ...EXTRACTION.entities,
+      {
+        ref: "E4",
+        kind: "rule",
+        name: "Gift card",
+        summary: "A gift card can be redeemed at checkout",
+        quotes: ["A gift card may be redeemed during checkout."],
+      },
+    ],
+    edges: [
+      {
+        from: "E2",
+        to: "E1",
+        kind: "governs",
+        quote: "Only one promo code may be applied.",
+        confidence: 1,
+      },
+      {
+        from: "E4",
+        to: "E1",
+        kind: "governs",
+        quote: "A gift card may be redeemed during checkout.",
+        confidence: 1,
+      },
+    ],
+  };
+
+  const first = queuedLlm([EXTRACTION]);
+  await ingestDocument(documentId, { llm: first.llm });
+  assert.equal(store.listEdges(projectId).length, 2);
+
+  const second = queuedLlm([V2]);
+  const redo = await ingestDocument(documentId, { llm: second.llm, force: true });
+
+  assert.equal(redo.entitiesCreated, 1, "Gift card is new");
+  assert.equal(redo.edgesAdded, 1, "Gift card -> Checkout");
+  assert.equal(redo.supersededEdges.length, 1, "Checkout -> Order is no longer asserted");
+  assert.equal(redo.supersededEdges[0].kind, "mutates");
+
+  const live = store.listEdges(projectId);
+  assert.equal(live.length, 2, "Promo -> Checkout and Gift card -> Checkout");
+  assert.equal(
+    live.some((e) => e.kind === "mutates"),
+    false,
+    "the retired edge is gone from the current view",
+  );
+  assert.equal(
+    store.listAllEdges(projectId).filter((e) => e.validTo !== null).length,
+    1,
+    "but it survives in history with a closed window",
+  );
+
+  // Its endpoints show up as changed, so impact traversal will start from them.
+  const order = store.listEntities(projectId).find((e) => e.name === "Order")!;
+  assert.ok(redo.changedEntityIds.includes(order.id));
 });

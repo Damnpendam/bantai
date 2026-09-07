@@ -9,6 +9,7 @@ import {
 import { getApiKey, getConfig } from "@/lib/settings";
 import { getProvider } from "@/lib/providers";
 import { ingestDocument, ingestProject } from "@/lib/ingest";
+import { impactReport, listConflicts, listEdgesHydrated } from "@/lib/impact";
 
 export const runtime = "nodejs";
 // Extraction + resolution is a couple of model calls per document.
@@ -25,8 +26,9 @@ export async function GET(
   }
   return NextResponse.json({
     entities: listEntities(id),
-    edges: listEdges(id),
+    edges: listEdgesHydrated(id),
     pending: listPendingFacts(id),
+    conflicts: listConflicts(id),
   });
 }
 
@@ -65,12 +67,18 @@ export async function POST(
         ? [await ingestDocument(documentId, { force })]
         : await ingestProject(id, { force });
 
+    const seeds = [
+      ...new Set(summaries.flatMap((s) => s.changedEntityIds)),
+    ];
+
     return NextResponse.json({
       summaries,
+      impact: seeds.length > 0 ? impactReport(id, seeds) : null,
       model: {
         entities: listEntities(id).length,
         edges: listEdges(id).length,
         pending: listPendingFacts(id).length,
+        conflicts: listConflicts(id).length,
       },
     });
   } catch (error) {

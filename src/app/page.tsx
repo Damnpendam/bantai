@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Documents } from "@/components/Documents";
+import { Model } from "@/components/Model";
 import { Roster } from "@/components/Roster";
 import { Cases } from "@/components/Cases";
 import { Settings, type SettingsState } from "@/components/Settings";
@@ -431,6 +432,8 @@ export default function Home() {
           </div>
 
           <div className="space-y-5">
+            <Model projectId={active.id} docCount={docCount} />
+
             {resumable && run?.nextStage ? (
               <Gate
                 nextStage={run.nextStage}
