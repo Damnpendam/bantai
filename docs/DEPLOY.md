@@ -13,7 +13,9 @@ You need the code in a GitHub repository (private is fine) and a Railway account
 
 2. **Attach a volume at `/data`.** On the service, add a volume with mount path `/data`.
    Without it, every deploy starts from an empty database — the server log warns you
-   (`not a mounted volume`) if this is missing.
+   (`not a mounted volume`) if this is missing. The image's entrypoint fixes the volume's
+   ownership on every start, so nothing else is needed for the app to be able to write to
+   it — no `RAILWAY_RUN_UID` or similar required.
 
 3. **Set variables** on the service:
 
@@ -21,7 +23,6 @@ You need the code in a GitHub repository (private is fine) and a Railway account
    |---|---|
    | `APP_SECRET` | Output of `openssl rand -base64 48`. **Keep a copy somewhere safe** — it encrypts every stored API key, and losing or changing it makes them unreadable. |
    | `SUPERADMIN_EMAIL` | Your email address. |
-   | `RAILWAY_RUN_UID` | `0` — Railway volumes are owned by root; this lets the app write its database. |
 
    Optional:
 
@@ -64,8 +65,8 @@ You need the code in a GitHub repository (private is fine) and a Railway account
 
 The same image runs anywhere: build the `Dockerfile`, mount a persistent volume at
 `/data`, set `APP_SECRET`, `SUPERADMIN_EMAIL` and `APP_URL`, and run exactly one
-instance. The container runs as the unprivileged `node` user (UID 1000), so the volume
-must be writable by it.
+instance. The entrypoint claims `/data` for the app's unprivileged user on every start,
+whatever host it is and whatever owns the volume beforehand — nothing extra to configure.
 
 - **Docker on a VPS**
 
@@ -79,13 +80,12 @@ must be writable by it.
     bantai
   ```
 
-  A named volume inherits the image's ownership, so it's writable as-is. Put a TLS reverse
-  proxy (Caddy, nginx) in front; for nginx, leave response buffering off so run progress
-  streams live (the app already sends `X-Accel-Buffering: no`). Save the `APP_SECRET` you
-  generated — it's needed on every restart.
+  Put a TLS reverse proxy (Caddy, nginx) in front; for nginx, leave response buffering off
+  so run progress streams live (the app already sends `X-Accel-Buffering: no`). Save the
+  `APP_SECRET` you generated — it's needed on every restart.
 
-- **Fly.io** — `fly launch` picks up the Dockerfile. Create a volume, mount it at `/data`
-  in `fly.toml`, keep a single machine, and make the volume writable by UID 1000.
+- **Fly.io** — `fly launch` picks up the Dockerfile. Create a volume and mount it at
+  `/data` in `fly.toml`, and keep a single machine.
 
 ## After the first deploy
 
