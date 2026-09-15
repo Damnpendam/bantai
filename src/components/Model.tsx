@@ -2,16 +2,21 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Card, CardHead, Metric, Spinner } from "@/components/ui";
+import { ModelGraph } from "@/components/ModelGraph";
+import { clsx } from "@/lib/clsx";
 
 interface EntityLite {
   id: string;
   name: string;
   kind: string;
+  summary?: string;
 }
 
 interface EdgeLite {
   id: string;
+  from: string;
   fromName: string;
+  to: string;
   toName: string;
   kind: string;
 }
@@ -87,6 +92,45 @@ function groupByKind(entities: EntityLite[]): [string, EntityLite[]][] {
   );
 }
 
+/** A section that can be folded away once it has been read. */
+function Section({
+  title,
+  count,
+  tone,
+  defaultOpen,
+  children,
+}: {
+  title: string;
+  count: number;
+  tone?: "bad" | "warn";
+  defaultOpen: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  if (count === 0) return null;
+  return (
+    <div className="border-t border-line">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left"
+      >
+        <span className="flex items-center gap-2 text-xs text-ink-faint">
+          <svg
+            viewBox="0 0 20 20"
+            className={clsx("size-3 transition-transform", open && "rotate-90")}
+            fill="currentColor"
+          >
+            <path d="M7 5l6 5-6 5V5z" />
+          </svg>
+          {title}
+        </span>
+        <Badge tone={tone ?? "neutral"}>{count}</Badge>
+      </button>
+      {open ? <div className="px-4 pb-3">{children}</div> : null}
+    </div>
+  );
+}
+
 export function Model({
   projectId,
   docCount,
@@ -98,6 +142,7 @@ export function Model({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<RunResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [view, setView] = useState<"graph" | "list">("graph");
 
   const load = useCallback(async () => {
     const response = await fetch(`/api/projects/${projectId}/ingest`);
@@ -147,14 +192,32 @@ export function Model({
             : "not built yet"
         }
         action={
-          <Button
-            size="sm"
-            variant={built ? "outline" : "primary"}
-            disabled={busy || docCount === 0}
-            onClick={() => void build(built)}
-          >
-            {busy ? <Spinner /> : null} {built ? "Rebuild" : "Build product model"}
-          </Button>
+          <div className="flex items-center gap-2">
+            {built ? (
+              <div className="flex rounded-lg border border-line-strong p-0.5 text-xs">
+                {(["graph", "list"] as const).map((v) => (
+                  <button
+                    key={v}
+                    onClick={() => setView(v)}
+                    className={clsx(
+                      "rounded-md px-2 py-1 capitalize transition",
+                      view === v ? "bg-accent text-white dark:text-[#16150f]" : "text-ink-soft",
+                    )}
+                  >
+                    {v}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <Button
+              size="sm"
+              variant={built ? "outline" : "primary"}
+              disabled={busy || docCount === 0}
+              onClick={() => void build(built)}
+            >
+              {busy ? <Spinner /> : null} {built ? "Rebuild" : "Build product model"}
+            </Button>
+          </div>
         }
       />
 
@@ -203,10 +266,51 @@ export function Model({
         </div>
       ) : null}
 
-      {model && model.conflicts.length > 0 ? (
-        <div className="border-t border-line px-4 py-3">
-          <p className="text-xs text-ink-faint">Conflicts</p>
-          <ul className="mt-1 space-y-1.5 text-sm">
+      {built && view === "graph" ? (
+        <div className="border-t border-line">
+          <ModelGraph entities={model!.entities} edges={model!.edges} />
+        </div>
+      ) : null}
+
+      {built && view === "list" ? (
+        <>
+          <div className="border-t border-line px-4 py-3">
+            <p className="text-xs text-ink-faint">Entities</p>
+            <div className="mt-1.5 space-y-2">
+              {groupByKind(model!.entities).map(([kind, items]) => (
+                <div key={kind}>
+                  <p className="text-[11px] uppercase tracking-wide text-ink-faint">
+                    {kind.replace(/_/g, " ")}
+                  </p>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {items.map((e) => (
+                      <Badge key={e.id}>{e.name}</Badge>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {model!.edges.length > 0 ? (
+            <div className="border-t border-line px-4 py-3">
+              <p className="text-xs text-ink-faint">Relationships</p>
+              <ul className="mt-1 space-y-0.5 text-sm text-ink-soft">
+                {model!.edges.map((e) => (
+                  <li key={e.id}>
+                    {e.fromName} <span className="text-ink-faint">—{e.kind}→</span>{" "}
+                    {e.toName}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+
+      {model ? (
+        <Section title="Conflicts" count={model.conflicts.length} tone="bad" defaultOpen>
+          <ul className="space-y-1.5 text-sm">
             {model.conflicts.map((c) => (
               <li key={c.edgeId}>
                 <span className="text-red-600">{c.a.name}</span>{" "}
@@ -218,55 +322,20 @@ export function Model({
               </li>
             ))}
           </ul>
-        </div>
+        </Section>
       ) : null}
 
-      {built ? (
-        <div className="border-t border-line px-4 py-3">
-          <p className="text-xs text-ink-faint">Entities</p>
-          <div className="mt-1.5 space-y-2">
-            {groupByKind(model!.entities).map(([kind, items]) => (
-              <div key={kind}>
-                <p className="text-[11px] uppercase tracking-wide text-ink-faint">
-                  {kind.replace(/_/g, " ")}
-                </p>
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {items.map((e) => (
-                    <Badge key={e.id}>{e.name}</Badge>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      {built && model!.edges.length > 0 ? (
-        <div className="border-t border-line px-4 py-3">
-          <p className="text-xs text-ink-faint">Relationships</p>
-          <ul className="mt-1 space-y-0.5 text-sm text-ink-soft">
-            {model!.edges.map((e) => (
-              <li key={e.id}>
-                {e.fromName} <span className="text-ink-faint">—{e.kind}→</span>{" "}
-                {e.toName}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-
-      {built && model!.pending.length > 0 ? (
-        <div className="border-t border-line px-4 py-3">
-          <p className="text-xs text-ink-faint">Pending — needs a look</p>
-          <ul className="mt-1 space-y-1 text-sm text-ink-soft">
-            {model!.pending.map((p) => (
+      {model ? (
+        <Section title="Pending — needs a look" count={model.pending.length} tone="warn" defaultOpen>
+          <ul className="space-y-1 text-sm text-ink-soft">
+            {model.pending.map((p) => (
               <li key={p.id} className="flex gap-2">
                 <Badge tone="warn">{p.kind.replace(/_/g, " ")}</Badge>
                 <span>{p.reason}</span>
               </li>
             ))}
           </ul>
-        </div>
+        </Section>
       ) : null}
     </Card>
   );

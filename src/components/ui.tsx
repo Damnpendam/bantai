@@ -102,6 +102,46 @@ export function Metric({ label, value }: { label: string; value: string | number
   );
 }
 
+export function TabBar<T extends string>({
+  tabs,
+  active,
+  onChange,
+}: {
+  tabs: { id: T; label: string; count?: number }[];
+  active: T;
+  onChange: (id: T) => void;
+}) {
+  return (
+    <div className="flex gap-4 border-b border-line px-1">
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          onClick={() => onChange(t.id)}
+          className={clsx(
+            "relative flex items-center gap-1.5 px-1 py-2.5 text-sm font-medium transition",
+            active === t.id ? "text-ink" : "text-ink-faint hover:text-ink-soft",
+          )}
+        >
+          {t.label}
+          {t.count ? (
+            <span
+              className={clsx(
+                "rounded-full px-1.5 py-0.5 text-[11px] leading-none",
+                active === t.id ? "bg-accent-soft text-accent" : "bg-canvas text-ink-faint",
+              )}
+            >
+              {t.count}
+            </span>
+          ) : null}
+          {active === t.id ? (
+            <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-accent" />
+          ) : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function Spinner({ className }: { className?: string }) {
   return (
     <span

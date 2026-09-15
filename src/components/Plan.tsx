@@ -14,8 +14,16 @@ const STAGE_LABEL: Record<Stage, string> = {
   review: "review, dedupe and gap repair",
 };
 
-export function PlanPanel({ plan }: { plan: TestPlan }) {
-  const [open, setOpen] = useState(true);
+export function PlanPanel({
+  plan,
+  defaultCollapsed = false,
+}: {
+  plan: TestPlan;
+  /** Collapse the whole plan by default — once cases exist, it's reference, not the task. */
+  defaultCollapsed?: boolean;
+}) {
+  const [open, setOpen] = useState(!defaultCollapsed);
+  const [briefsOpen, setBriefsOpen] = useState(true);
   const planned = plan.briefs.reduce((sum, b) => sum + (b.targetCount ?? 0), 0);
 
   return (
@@ -25,57 +33,72 @@ export function PlanPanel({ plan }: { plan: TestPlan }) {
         hint={`${plan.riskAreas.length} risk areas · ${plan.briefs.length} suite briefs · ~${planned} cases planned`}
         action={
           <Button size="sm" variant="ghost" onClick={() => setOpen(!open)}>
-            {open ? "Hide briefs" : "Show briefs"}
+            {open ? "Collapse" : "Expand"}
           </Button>
         }
       />
-      <div className="px-4 py-3">
-        <p className="text-sm text-ink-soft">{plan.productSummary}</p>
-        <ul className="mt-3 space-y-1.5">
-          {plan.riskAreas.map((risk) => (
-            <li key={risk.area} className="flex gap-2 text-sm">
-              <Badge tone={risk.severity === "P0" ? "bad" : "warn"}>{risk.severity}</Badge>
-              <span className="text-ink-soft">
-                <span className="text-ink">{risk.area}</span> — {risk.rationale}
-              </span>
-            </li>
-          ))}
-        </ul>
-      </div>
 
-      {open ? (
-        <div className="border-t border-line">
-          {plan.briefs.map((brief) => (
-            <div key={brief.discipline} className="border-b border-line px-4 py-3 last:border-0">
-              <div className="flex items-baseline justify-between gap-3">
-                <h3 className="text-sm font-medium text-ink">
-                  {AGENT_BY_ID[brief.discipline]?.label ?? brief.discipline}
-                </h3>
-                <span className="shrink-0 text-xs text-ink-faint">
-                  ~{brief.targetCount} cases · {brief.requirementIds.length} requirements
-                </span>
-              </div>
-              <p className="mt-1 text-sm text-ink-soft">{brief.focus}</p>
-              {brief.outOfScope ? (
-                <p className="mt-1 text-xs text-ink-faint">
-                  Leaves alone: {brief.outOfScope}
-                </p>
-              ) : null}
+      {!open ? null : (
+        <>
+          <div className="px-4 py-3">
+            <p className="text-sm text-ink-soft">{plan.productSummary}</p>
+            <ul className="mt-3 space-y-1.5">
+              {plan.riskAreas.map((risk) => (
+                <li key={risk.area} className="flex gap-2 text-sm">
+                  <Badge tone={risk.severity === "P0" ? "bad" : "warn"}>{risk.severity}</Badge>
+                  <span className="text-ink-soft">
+                    <span className="text-ink">{risk.area}</span> — {risk.rationale}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="border-t border-line">
+            <button
+              onClick={() => setBriefsOpen(!briefsOpen)}
+              className="flex w-full items-center justify-between px-4 py-2 text-left text-xs text-ink-faint hover:bg-canvas"
+            >
+              Suite briefs
+              <span>{briefsOpen ? "Hide" : "Show"}</span>
+            </button>
+            {briefsOpen
+              ? plan.briefs.map((brief) => (
+                  <div
+                    key={brief.discipline}
+                    className="border-t border-line px-4 py-3"
+                  >
+                    <div className="flex items-baseline justify-between gap-3">
+                      <h3 className="text-sm font-medium text-ink">
+                        {AGENT_BY_ID[brief.discipline]?.label ?? brief.discipline}
+                      </h3>
+                      <span className="shrink-0 text-xs text-ink-faint">
+                        ~{brief.targetCount} cases · {brief.requirementIds.length} requirements
+                      </span>
+                    </div>
+                    <p className="mt-1 text-sm text-ink-soft">{brief.focus}</p>
+                    {brief.outOfScope ? (
+                      <p className="mt-1 text-xs text-ink-faint">
+                        Leaves alone: {brief.outOfScope}
+                      </p>
+                    ) : null}
+                  </div>
+                ))
+              : null}
+          </div>
+
+          {plan.exitCriteria.length > 0 ? (
+            <div className="border-t border-line px-4 py-3">
+              <p className="text-xs text-ink-faint">Exit criteria</p>
+              <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-ink-soft">
+                {plan.exitCriteria.map((c, i) => (
+                  <li key={i}>{c}</li>
+                ))}
+              </ul>
             </div>
-          ))}
-        </div>
-      ) : null}
-
-      {plan.exitCriteria.length > 0 ? (
-        <div className="border-t border-line px-4 py-3">
-          <p className="text-xs text-ink-faint">Exit criteria</p>
-          <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-ink-soft">
-            {plan.exitCriteria.map((c, i) => (
-              <li key={i}>{c}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
+          ) : null}
+        </>
+      )}
     </Card>
   );
 }

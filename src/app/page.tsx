@@ -7,7 +7,7 @@ import { Roster } from "@/components/Roster";
 import { Cases } from "@/components/Cases";
 import { Settings, type SettingsState } from "@/components/Settings";
 import { Gate, PlanPanel } from "@/components/Plan";
-import { Badge, Button, Card, CardHead, Metric, Spinner } from "@/components/ui";
+import { Badge, Button, Card, CardHead, Metric, Spinner, TabBar } from "@/components/ui";
 import { initialAgents } from "@/lib/agents/ids";
 import { isActiveRun } from "@/lib/types";
 import type {
@@ -54,6 +54,14 @@ const STATUS_COPY: Record<RunStatus, string> = {
   failed: "failed",
 };
 
+function EmptyTab({ text }: { text: string }) {
+  return (
+    <div className="rounded-xl border border-dashed border-line px-4 py-10 text-center text-sm text-ink-faint">
+      {text}
+    </div>
+  );
+}
+
 const EXPORTS = [
   { format: "csv", label: "CSV" },
   { format: "markdown", label: "Markdown" },
@@ -75,7 +83,11 @@ export default function Home() {
   const [notice, setNotice] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [tab, setTab] = useState<"model" | "plan" | "cases" | "review">("model");
   const sourceRef = useRef<EventSource | null>(null);
+  // Guards the auto-jump-to-Plan below so it fires once per gate, not on every
+  // event the still-open stream delivers while paused there.
+  const jumpedForRef = useRef<string | null>(null);
 
   const active = projects.find((p) => p.id === activeId) ?? null;
   const running = run ? isActiveRun(run.status) : false;
@@ -173,6 +185,8 @@ export default function Home() {
       return;
     }
     setLog([]);
+    setTab("model");
+    jumpedForRef.current = null;
     sourceRef.current?.close();
     void fetch(`/api/projects/${activeId}/runs`)
       .then((r) => r.json())
@@ -284,6 +298,16 @@ export default function Home() {
   }
 
   const kept = run?.cases.filter((c) => c.verdict !== "rejected") ?? [];
+
+  // The plan gate is the one moment a person must act before anything is
+  // spent — jump to it once, the first time it opens, rather than leaving it
+  // one tab away from whichever the user happened to be looking at.
+  useEffect(() => {
+    if (!run || run.status !== "paused" || run.nextStage !== "wave1") return;
+    if (jumpedForRef.current === run.id) return;
+    jumpedForRef.current = run.id;
+    setTab("plan");
+  }, [run]);
 
   return (
     <div className="mx-auto max-w-7xl px-5 py-6">
@@ -432,8 +456,6 @@ export default function Home() {
           </div>
 
           <div className="space-y-5">
-            <Model projectId={active.id} docCount={docCount} />
-
             {resumable && run?.nextStage ? (
               <Gate
                 nextStage={run.nextStage}
@@ -447,49 +469,74 @@ export default function Home() {
               />
             ) : null}
 
-            {run?.plan ? <PlanPanel plan={run.plan} /> : null}
+            <TabBar
+              tabs={[
+                { id: "model", label: "Product model" },
+                { id: "plan", label: "Test plan" },
+                { id: "cases", label: "Test cases", count: kept.length },
+                { id: "review", label: "Review" },
+              ]}
+              active={tab}
+              onChange={setTab}
+            />
 
-            <Cases cases={run?.cases ?? []} runId={run?.id ?? null} onVerdict={applyVerdict} />
+            {tab === "model" ? <Model projectId={active.id} docCount={docCount} /> : null}
 
-            {run?.review ? (
-              <Card>
-                <CardHead
-                  title="Reviewer report"
-                  hint={
-                    run.review.uncoveredRequirementIds.length === 1
-                      ? "1 requirement uncovered"
-                      : `${run.review.uncoveredRequirementIds.length} requirements uncovered`
-                  }
-                />
-                <div className="space-y-3 px-4 py-3 text-sm">
-                  {run.review.uncoveredRequirementIds.length > 0 ? (
-                    <div>
-                      <p className="text-xs text-ink-faint">Uncovered requirements</p>
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {run.review.uncoveredRequirementIds.map((id) => (
-                          <Badge key={id} tone="warn">
-                            {id}
-                          </Badge>
-                        ))}
+            {tab === "plan" ? (
+              run?.plan ? (
+                <PlanPanel plan={run.plan} defaultCollapsed={run.cases.length > 0} />
+              ) : (
+                <EmptyTab text="No plan yet — start a run to see the architect's briefs here." />
+              )
+            ) : null}
+
+            {tab === "cases" ? (
+              <Cases cases={run?.cases ?? []} runId={run?.id ?? null} onVerdict={applyVerdict} />
+            ) : null}
+
+            {tab === "review" ? (
+              run?.review ? (
+                <Card>
+                  <CardHead
+                    title="Reviewer report"
+                    hint={
+                      run.review.uncoveredRequirementIds.length === 1
+                        ? "1 requirement uncovered"
+                        : `${run.review.uncoveredRequirementIds.length} requirements uncovered`
+                    }
+                  />
+                  <div className="space-y-3 px-4 py-3 text-sm">
+                    {run.review.uncoveredRequirementIds.length > 0 ? (
+                      <div>
+                        <p className="text-xs text-ink-faint">Uncovered requirements</p>
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {run.review.uncoveredRequirementIds.map((id) => (
+                            <Badge key={id} tone="warn">
+                              {id}
+                            </Badge>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  ) : (
-                    <p className="text-ink-soft">
-                      Every requirement is covered by at least one case.
-                    </p>
-                  )}
-                  {run.review.qualityNotes.length > 0 ? (
-                    <div>
-                      <p className="text-xs text-ink-faint">Quality notes</p>
-                      <ul className="mt-1 list-disc space-y-1 pl-5 text-ink-soft">
-                        {run.review.qualityNotes.map((note, i) => (
-                          <li key={i}>{note}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
-                </div>
-              </Card>
+                    ) : (
+                      <p className="text-ink-soft">
+                        Every requirement is covered by at least one case.
+                      </p>
+                    )}
+                    {run.review.qualityNotes.length > 0 ? (
+                      <div>
+                        <p className="text-xs text-ink-faint">Quality notes</p>
+                        <ul className="mt-1 list-disc space-y-1 pl-5 text-ink-soft">
+                          {run.review.qualityNotes.map((note, i) => (
+                            <li key={i}>{note}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                </Card>
+              ) : (
+                <EmptyTab text="No review yet — the reviewer runs once both waves finish." />
+              )
             ) : null}
           </div>
         </div>
