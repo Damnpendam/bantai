@@ -31,6 +31,10 @@ COPY --from=build /app/package.json /app/next.config.ts /app/tsconfig.json ./
 RUN mkdir -p /data && chown -R node:node /data /app/.next
 USER node
 EXPOSE 3000
-VOLUME ["/data"]
+# No VOLUME instruction: Railway's builder refuses it outright ("use Railway
+# Volumes" — attach one at /data through the dashboard or railway.json
+# instead). The directory above already exists and is writable either way;
+# on hosts that do read a Dockerfile VOLUME, a `docker run -v`/named-volume
+# mount lands on /data without needing the declaration too.
 # next directly, not `npm start`, so SIGTERM from the host reaches the server.
 CMD ["node_modules/.bin/next", "start"]
