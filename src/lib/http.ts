@@ -107,6 +107,9 @@ export function assertSameOrigin(request: Request): void {
   const allowed = new Set<string>();
   const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
   if (host) allowed.add(host.toLowerCase());
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) {
+    allowed.add(process.env.RAILWAY_PUBLIC_DOMAIN.toLowerCase());
+  }
   if (process.env.APP_URL) {
     try {
       allowed.add(new URL(process.env.APP_URL).host.toLowerCase());
@@ -181,9 +184,14 @@ export function clientIp(request: Request): string {
   return request.headers.get("x-real-ip") ?? "unknown";
 }
 
-/** Base URL for links in emails. APP_URL wins; otherwise the request's own origin. */
+/**
+ * Base URL for links in emails. APP_URL wins; on Railway the service's public
+ * domain is the next best thing (it's the only choice at boot, when there is no
+ * request to read a host from); otherwise the request's own origin.
+ */
 export function appOrigin(request?: Request): string {
   if (process.env.APP_URL) return process.env.APP_URL.replace(/\/+$/, "");
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
   if (request) {
     const proto = request.headers.get("x-forwarded-proto") ?? new URL(request.url).protocol.replace(":", "");
     const host = request.headers.get("x-forwarded-host") ?? request.headers.get("host");

@@ -105,9 +105,11 @@ every project and saved key from before accounts existed, with the keys re-encry
 
 Bantai needs one long-running Node process and a persistent disk — runs last minutes,
 report over SSE, and the database is SQLite. Serverless platforms (Vercel, Netlify) don't
-fit; a container host with a volume (Railway, Fly.io, Render, a VPS) does. Mount a
-volume, point `BANTAI_DATA_DIR` at it, set the variables in `.env.example`, and run
-`npm run build && npm start`.
+fit; a container host with a volume (Railway, Fly.io, Render, a VPS) does.
+
+The repo ships a `Dockerfile` and a `railway.json`, and `/api/health` gates each deploy.
+**[docs/DEPLOY.md](docs/DEPLOY.md)** walks through Railway step by step, with notes for
+other hosts.
 
 ## Providers
 

@@ -1,0 +1,14 @@
+# Never let local state into an image: data/ holds the database (and, in
+# development, the generated encryption secret); .env.local holds your config.
+data
+.env*
+!.env.example
+
+.git
+.claude
+node_modules
+.next
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+research
