@@ -21,6 +21,17 @@ export interface SettingsState {
   effort: string;
   concurrency: number;
   providers: ProviderInfo[];
+  /** Only a workspace owner may change its keys and model. */
+  canEdit: boolean;
+  /** The operator's shared key, if one is configured on this server. */
+  platform: {
+    providerLabel: string;
+    model: string;
+    dailyRuns: number;
+    dailyIngests: number;
+    runsUsedToday: number;
+    ingestsUsedToday: number;
+  } | null;
 }
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -122,7 +133,27 @@ export function Settings({
         className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-line bg-surface p-5"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="text-base font-medium">Settings</h2>
+        <h2 className="text-base font-medium">Workspace settings</h2>
+        <p className="mt-1 text-xs text-ink-faint">
+          These apply to your workspace only. Nobody else — including administrators — can see
+          your keys or projects.
+        </p>
+
+        {state.platform ? (
+          <p className="mt-3 rounded-lg bg-accent-soft px-3 py-2 text-xs text-accent">
+            No key needed to try it: without one, your workspace uses this server&rsquo;s shared{" "}
+            {state.platform.providerLabel} key on{" "}
+            <span className="font-mono">{state.platform.model}</span>, limited to{" "}
+            {state.platform.dailyRuns} runs and {state.platform.dailyIngests} model builds a day.
+            Adding your own key below removes the limit and lets you pick the model.
+          </p>
+        ) : null}
+
+        {!state.canEdit ? (
+          <p className="mt-3 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+            Only this workspace&rsquo;s owner can change its settings.
+          </p>
+        ) : null}
 
         <label className="mt-4 block text-sm font-medium">Provider</label>
         <div className="mt-1.5 flex gap-1.5">
@@ -153,8 +184,7 @@ export function Settings({
           className="mt-1.5 w-full rounded-lg border border-line-strong bg-canvas px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-accent/40"
         />
         <p className="mt-1.5 text-xs text-ink-faint">
-          Stored server-side in this app&rsquo;s local database and sent only to{" "}
-          {info.label}.{" "}
+          Encrypted at rest, readable only by your workspace, and sent only to {info.label}.{" "}
           <a
             href={info.keyUrl}
             target="_blank"
@@ -233,7 +263,7 @@ export function Settings({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={save} disabled={saving}>
+          <Button variant="primary" onClick={save} disabled={saving || !state.canEdit}>
             {saving ? <Spinner /> : null} Save
           </Button>
         </div>

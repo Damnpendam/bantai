@@ -2,9 +2,12 @@ node_modules
 .next
 # -wal and -shm hold recent writes in plaintext, API keys included.
 data/*.db*
+# Development encryption secret, generated on first run. Never commit it.
+data/.app-secret
 data/uploads/*
 !data/uploads/.gitkeep
 .env*
+!.env.example
 *.tsbuildinfo
 next-env.d.ts
 .DS_Store

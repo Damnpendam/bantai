@@ -1,45 +1,51 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import { addDocument, getProject, latestRun, listDocuments } from "@/lib/store";
+import { addDocument, latestRun, listDocuments } from "@/lib/store";
 import { parseDocument } from "@/lib/parse";
 import { isActiveRun } from "@/lib/types";
+import { api, HttpError, requireProject, requireUser } from "@/lib/http";
 
 export const runtime = "nodejs";
 
 const MAX_BYTES = 25 * 1024 * 1024;
+const MAX_DOCUMENTS = 100;
 
-export async function GET(
-  _request: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
+type Params = { params: Promise<{ id: string }> };
+
+export const GET = api(async (_request: Request, { params }: Params) => {
+  const ctx = await requireUser();
   const { id } = await params;
-  const documents = listDocuments(id).map(({ text, ...rest }) => ({
-    ...rest,
-    chars: text.length,
+  requireProject(ctx, id);
+  const documents = listDocuments(id).map((d) => ({
+    id: d.id,
+    name: d.name,
+    bytes: d.bytes,
+    created_at: d.created_at,
+    chars: d.text.length,
   }));
   return NextResponse.json({ documents });
-}
+});
 
-export async function POST(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
+export const POST = api(async (request: Request, { params }: Params) => {
+  const ctx = await requireUser();
   const { id } = await params;
-  if (!getProject(id)) {
-    return NextResponse.json({ error: "No such project." }, { status: 404 });
-  }
+  requireProject(ctx, id);
+
   const run = latestRun(id);
   if (run && isActiveRun(run.status)) {
-    return NextResponse.json(
-      { error: "A run is in progress. Cancel it before adding documents." },
-      { status: 409 },
-    );
+    throw new HttpError(409, "A run is in progress. Cancel it before adding documents.");
   }
 
-  const form = await request.formData();
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch {
+    throw new HttpError(400, "Upload the files as multipart form data.");
+  }
   const files = form.getAll("files").filter((f): f is File => f instanceof File);
-  if (files.length === 0) {
-    return NextResponse.json({ error: "No files were uploaded." }, { status: 400 });
+  if (files.length === 0) throw new HttpError(400, "No files were uploaded.");
+  if (listDocuments(id).length + files.length > MAX_DOCUMENTS) {
+    throw new HttpError(400, `A project can hold at most ${MAX_DOCUMENTS} documents.`);
   }
 
   const added: { name: string; chars: number }[] = [];
@@ -70,4 +76,4 @@ export async function POST(
   }
 
   return NextResponse.json({ added, failed });
-}
+});

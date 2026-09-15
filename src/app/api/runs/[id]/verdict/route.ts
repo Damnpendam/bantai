@@ -1,27 +1,29 @@
 import { NextResponse } from "next/server";
-import { getRun, updateRun } from "@/lib/store";
+import { updateRun } from "@/lib/store";
+import type { TestCase } from "@/lib/types";
+import { api, HttpError, jsonBody, requireRun, requireUser } from "@/lib/http";
 
 export const runtime = "nodejs";
 
-export async function POST(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const { id } = await params;
-  const run = getRun(id);
-  if (!run) return NextResponse.json({ error: "No such run." }, { status: 404 });
+export const POST = api(
+  async (request: Request, { params }: { params: Promise<{ id: string }> }) => {
+    const ctx = await requireUser();
+    const { id } = await params;
+    const { run } = requireRun(ctx, id);
 
-  const { caseId, verdict } = (await request.json()) as {
-    caseId?: string;
-    verdict?: "approved" | "rejected" | null;
-  };
-  if (!caseId) {
-    return NextResponse.json({ error: "caseId is required." }, { status: 400 });
-  }
+    const { caseId, verdict } = await jsonBody<{ caseId?: unknown; verdict?: unknown }>(request);
+    if (typeof caseId !== "string" || !caseId) {
+      throw new HttpError(400, "caseId is required.");
+    }
+    if (verdict !== "approved" && verdict !== "rejected" && verdict !== null) {
+      throw new HttpError(400, 'verdict must be "approved", "rejected" or null.');
+    }
+    if (!run.cases.some((c) => c.id === caseId)) throw new HttpError(404, "Not found.");
 
-  const cases = run.cases.map((c) =>
-    c.id === caseId ? { ...c, verdict: verdict ?? undefined } : c,
-  );
-  updateRun(id, { cases });
-  return NextResponse.json({ ok: true });
-}
+    const next: TestCase["verdict"] =
+      verdict === "approved" ? "approved" : verdict === "rejected" ? "rejected" : undefined;
+    const cases = run.cases.map((c) => (c.id === caseId ? { ...c, verdict: next } : c));
+    updateRun(id, { cases });
+    return NextResponse.json({ ok: true });
+  },
+);

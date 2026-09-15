@@ -1,15 +1,14 @@
 import { NextResponse } from "next/server";
-import { getRun } from "@/lib/store";
 import { reconcile } from "@/lib/orchestrator";
+import { api, requireRun, requireUser } from "@/lib/http";
 
 export const runtime = "nodejs";
 
-export async function GET(
-  _request: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const { id } = await params;
-  const run = getRun(id);
-  if (!run) return NextResponse.json({ error: "No such run." }, { status: 404 });
-  return NextResponse.json({ run: reconcile(run) });
-}
+export const GET = api(
+  async (_request: Request, { params }: { params: Promise<{ id: string }> }) => {
+    const ctx = await requireUser();
+    const { id } = await params;
+    const { run } = requireRun(ctx, id);
+    return NextResponse.json({ run: reconcile(run) });
+  },
+);

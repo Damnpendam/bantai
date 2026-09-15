@@ -61,19 +61,53 @@ that file is where you tune what a discipline means for your team.
 npm install && npm run dev
 ```
 
-Tests cover the pure logic that is hardest to get right — recovering truncated,
-fence-wrapped and prose-wrapped model output, and parsing `Retry-After`:
+Before the first start, set `SUPERADMIN_EMAIL` in `.env.local` (see `.env.example`).
+While no admin exists, each start prints a one-time setup link for that address to the
+server log — open it, set a password, and you're the super admin. No email provider is
+needed for this, locally or deployed.
+
+Tests cover the logic that is hardest to get right — recovering truncated, fence-wrapped
+and prose-wrapped model output, parsing `Retry-After`, password hashing, at-rest
+encryption, and the account and tenancy rules:
 
 ```bash
 npm test
 ```
 
-Open the app, click **Add API key**, pick a provider, and paste a key. Keys are stored
-per provider in the local SQLite database at `data/bantai.db` and are sent only to the
-provider they belong to. Then create a project, upload documents, and click
-**Generate test cases**.
+Then open **Settings**, pick a provider and paste a key, create a project, upload
+documents, and click **Generate test cases**.
 
 `examples/sample-prd.md` is a small checkout spec you can use to try a run.
+
+## Accounts and tenancy
+
+- **Invite-only.** A super admin invites people by email from `/admin`; there is no
+  public signup. Invite links work once and expire after 7 days. Without
+  `RESEND_API_KEY`, the admin page shows the link to pass on by hand.
+- **A workspace is the tenant.** Everyone gets one at signup. Projects, documents, runs
+  and the product model belong to it, and every API route checks that the caller belongs
+  to the workspace that owns what they asked for. Someone else's project and a project
+  that doesn't exist both answer 404, so ids can't be probed.
+- **Super admins manage accounts, not data.** They invite, disable and re-enable people,
+  but can't see anyone else's projects.
+- **Keys are per workspace and encrypted at rest** (AES-256-GCM, keyed from
+  `APP_SECRET`). Optionally, `PLATFORM_API_KEY` gives workspaces with no key of their own
+  a daily-capped allowance on a model you choose.
+- **Sessions** are random tokens in an httpOnly, SameSite=Lax cookie; only a hash is
+  stored. Mutations are checked against `Origin` / `Sec-Fetch-Site`, and login, reset and
+  invite endpoints are rate-limited. Invite and reset tokens travel in the URL fragment,
+  so they never reach a server log.
+
+Existing single-user installs upgrade in place: the first super admin to sign up inherits
+every project and saved key from before accounts existed, with the keys re-encrypted.
+
+## Hosting
+
+Bantai needs one long-running Node process and a persistent disk — runs last minutes,
+report over SSE, and the database is SQLite. Serverless platforms (Vercel, Netlify) don't
+fit; a container host with a volume (Railway, Fly.io, Render, a VPS) does. Mount a
+volume, point `BANTAI_DATA_DIR` at it, set the variables in `.env.example`, and run
+`npm run build && npm start`.
 
 ## Providers
 

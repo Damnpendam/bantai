@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 // Relative, extension-qualified imports so ingest.test.ts runs under the node
-// test runner. The production LLM wiring (llm-config -> settings -> providers)
-// is loaded lazily below, only when no Llm was injected, so a test never pulls
-// in the "@/"-aliased chain the runner cannot resolve.
+// test runner. The caller supplies the Llm — built from the owning workspace's
+// settings by the route, or scripted by a test — so this module never needs to
+// know whose API key pays for the call.
 import type { Llm } from "./llm.ts";
 import { extractModel, resolveEntities } from "./agents/extractor.ts";
 import {
@@ -84,7 +84,7 @@ function endpointId(
 async function ingestOne(
   document: DocumentRow,
   force: boolean,
-  llmOverride?: Llm,
+  llm: Llm,
 ): Promise<IngestSummary> {
   const base: IngestSummary = {
     documentId: document.id,
@@ -112,9 +112,6 @@ async function ingestOne(
   }
 
   const projectId = document.project_id;
-  const llm =
-    llmOverride ??
-    (await import("./llm-config.ts")).makeLlm(32000, undefined, "low");
 
   const extraction = await extractModel(llm, {
     name: document.name,
@@ -330,14 +327,14 @@ function pendingEdgePayload(edge: ExtractedEdge) {
 
 interface IngestOptions {
   force?: boolean;
-  /** Inject a scripted Llm for tests; production builds one from settings. */
-  llm?: Llm;
+  /** Built from the owning workspace's settings; a scripted stand-in in tests. */
+  llm: Llm;
 }
 
 /** Ingest one document into its project's product model. */
 export async function ingestDocument(
   documentId: string,
-  { force = false, llm }: IngestOptions = {},
+  { force = false, llm }: IngestOptions,
 ): Promise<IngestSummary> {
   const document = getDocument(documentId);
   if (!document) throw new Error("No such document.");
@@ -350,7 +347,7 @@ export async function ingestDocument(
  */
 export async function ingestProject(
   projectId: string,
-  { force = false, llm }: IngestOptions = {},
+  { force = false, llm }: IngestOptions,
 ): Promise<IngestSummary[]> {
   const out: IngestSummary[] = [];
   for (const document of listDocuments(projectId)) {

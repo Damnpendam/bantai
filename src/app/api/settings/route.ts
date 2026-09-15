@@ -1,5 +1,12 @@
 import { NextResponse } from "next/server";
-import { getApiKey, getConfig, setApiKey, setConfig } from "@/lib/settings";
+import {
+  getApiKey,
+  getConfig,
+  platformConfig,
+  setApiKey,
+  setConfig,
+  usageToday,
+} from "@/lib/settings";
 import {
   EFFORTS,
   PROVIDER_LIST,
@@ -8,15 +15,22 @@ import {
   type Effort,
   type ProviderId,
 } from "@/lib/providers";
+import { isOwner } from "@/lib/auth";
+import { api, HttpError, jsonBody, requireUser } from "@/lib/http";
+import { rateLimit } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-function snapshot() {
-  const config = getConfig();
+/** Settings of the caller's own workspace. Keys leave only as a four-character hint. */
+function snapshot(workspaceId: string, canEdit: boolean) {
+  const config = getConfig(workspaceId);
+  const platform = platformConfig();
   return {
     ...config,
+    canEdit,
     providers: PROVIDER_LIST.map((p) => {
-      const key = getApiKey(p.id);
+      const key = getApiKey(workspaceId, p.id);
       return {
         id: p.id,
         label: p.label,
@@ -28,57 +42,76 @@ function snapshot() {
         keyHint: key ? `…${key.slice(-4)}` : null,
       };
     }),
+    platform: platform
+      ? {
+          providerLabel: getProvider(platform.provider).label,
+          model: platform.model,
+          dailyRuns: platform.dailyRuns,
+          dailyIngests: platform.dailyIngests,
+          runsUsedToday: usageToday(workspaceId, "run"),
+          ingestsUsedToday: usageToday(workspaceId, "ingest"),
+        }
+      : null,
   };
 }
 
-export async function GET() {
-  return NextResponse.json(snapshot());
-}
+export const GET = api(async (_request: Request) => {
+  const ctx = await requireUser();
+  return NextResponse.json(snapshot(ctx.workspace.id, isOwner(ctx.user.id, ctx.workspace.id)));
+});
 
-export async function POST(request: Request) {
-  const body = (await request.json()) as {
-    provider?: string;
-    apiKey?: string;
-    apiKeyProvider?: string;
-    model?: string;
-    effort?: string;
-    concurrency?: number;
-  };
+export const POST = api(async (request: Request) => {
+  const ctx = await requireUser();
+  const workspaceId = ctx.workspace.id;
+  if (!isOwner(ctx.user.id, workspaceId)) {
+    throw new HttpError(403, "Only the workspace owner can change its settings.");
+  }
+  const body = await jsonBody<{
+    provider?: unknown;
+    apiKey?: unknown;
+    apiKeyProvider?: unknown;
+    model?: unknown;
+    effort?: unknown;
+    concurrency?: unknown;
+  }>(request);
+
+  if (body.provider !== undefined && (typeof body.provider !== "string" || !isProviderId(body.provider))) {
+    throw new HttpError(400, "Unknown provider.");
+  }
+  if (body.effort !== undefined && !EFFORTS.includes(body.effort as Effort)) {
+    throw new HttpError(400, "Unknown effort.");
+  }
+  if (body.concurrency !== undefined && !Number.isFinite(body.concurrency)) {
+    throw new HttpError(400, "concurrency must be a number.");
+  }
+  if (body.model !== undefined && (typeof body.model !== "string" || body.model.length > 200)) {
+    throw new HttpError(400, "Model must be a model id.");
+  }
 
   // A key is always saved against a named provider, never the active one — the
   // user may be pasting a Gemini key while Anthropic is still selected.
   if (typeof body.apiKey === "string" && body.apiKey.trim()) {
-    const target = body.apiKeyProvider ?? body.provider ?? getConfig().provider;
-    if (!isProviderId(target)) {
-      return NextResponse.json({ error: `Unknown provider "${target}".` }, { status: 400 });
+    // Verifying calls the provider; don't let this become a free key-checking oracle.
+    if (!rateLimit(`verifykey:${ctx.user.id}`, 20, 60 * 60 * 1000).ok) {
+      throw new HttpError(429, "Too many key checks this hour. Try again later.");
     }
-    const apiKey = body.apiKey.trim();
+    const target = body.apiKeyProvider ?? body.provider ?? getConfig(workspaceId).provider;
+    if (typeof target !== "string" || !isProviderId(target)) {
+      throw new HttpError(400, "Unknown provider.");
+    }
+    const apiKey = body.apiKey.trim().slice(0, 500);
     if (!(await getProvider(target).verifyKey(apiKey))) {
-      return NextResponse.json(
-        { error: `That key was rejected by ${getProvider(target).label}.` },
-        { status: 400 },
-      );
+      throw new HttpError(400, `That key was rejected by ${getProvider(target).label}.`);
     }
-    setApiKey(target as ProviderId, apiKey);
+    setApiKey(workspaceId, target as ProviderId, apiKey);
   }
 
-  if (body.provider && !isProviderId(body.provider)) {
-    return NextResponse.json({ error: `Unknown provider "${body.provider}".` }, { status: 400 });
-  }
-  if (body.effort && !EFFORTS.includes(body.effort as Effort)) {
-    return NextResponse.json({ error: `Unknown effort "${body.effort}".` }, { status: 400 });
-  }
-
-  if (body.concurrency !== undefined && !Number.isFinite(body.concurrency)) {
-    return NextResponse.json({ error: "concurrency must be a number." }, { status: 400 });
-  }
-
-  setConfig({
+  setConfig(workspaceId, {
     provider: body.provider as ProviderId | undefined,
-    model: body.model,
+    model: body.model as string | undefined,
     effort: body.effort as Effort | undefined,
-    concurrency: body.concurrency,
+    concurrency: body.concurrency as number | undefined,
   });
 
-  return NextResponse.json(snapshot());
-}
+  return NextResponse.json(snapshot(workspaceId, true));
+});

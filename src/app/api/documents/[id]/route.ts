@@ -1,25 +1,22 @@
 import { NextResponse } from "next/server";
-import { deleteDocument, getDocument, latestRun } from "@/lib/store";
+import { deleteDocument, latestRun } from "@/lib/store";
 import { isActiveRun } from "@/lib/types";
+import { api, HttpError, requireDocument, requireUser } from "@/lib/http";
 
 export const runtime = "nodejs";
 
-export async function DELETE(
-  _request: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const { id } = await params;
-  const doc = getDocument(id);
-  if (!doc) return NextResponse.json({ error: "No such document." }, { status: 404 });
+export const DELETE = api(
+  async (_request: Request, { params }: { params: Promise<{ id: string }> }) => {
+    const ctx = await requireUser();
+    const { id } = await params;
+    const { document } = requireDocument(ctx, id);
 
-  const run = latestRun(doc.project_id);
-  if (run && isActiveRun(run.status)) {
-    return NextResponse.json(
-      { error: "A run is in progress. Cancel it before changing documents." },
-      { status: 409 },
-    );
-  }
+    const run = latestRun(document.project_id);
+    if (run && isActiveRun(run.status)) {
+      throw new HttpError(409, "A run is in progress. Cancel it before changing documents.");
+    }
 
-  deleteDocument(id);
-  return NextResponse.json({ ok: true });
-}
+    deleteDocument(id);
+    return NextResponse.json({ ok: true });
+  },
+);

@@ -1,11 +1,17 @@
-import { getConfig } from "@/lib/settings";
+import { resolveModelAccess, type ModelAccess } from "@/lib/settings";
 import { makeLlm } from "@/lib/llm-config";
 import { AGENTS, WAVE1, WAVE2, type AgentSpec } from "@/lib/agents/roster";
 import { buildPlan, extractRequirements } from "@/lib/agents/planner";
 import { writeSuite } from "@/lib/agents/writer";
 import { review } from "@/lib/agents/reviewer";
 import { emit } from "@/lib/events";
-import { listDocuments, getRun, updateRun, type RunRecord } from "@/lib/store";
+import {
+  listDocuments,
+  getRun,
+  updateRun,
+  workspaceOfProject,
+  type RunRecord,
+} from "@/lib/store";
 import {
   isActiveRun,
   nextAfter,
@@ -37,6 +43,30 @@ export function cancelRun(runId: string): boolean {
 
 export function isRunning(runId: string): boolean {
   return inFlight.has(runId);
+}
+
+/**
+ * Every tenant shares this one process. Past MAX_ACTIVE_RUNS concurrently
+ * executing stages, new work is turned away rather than letting one busy
+ * workspace starve everyone else's runs of CPU and provider rate limit.
+ */
+export function capacityProblem(): string | null {
+  const max = Number(process.env.MAX_ACTIVE_RUNS ?? 4) || 4;
+  return inFlight.size >= max
+    ? "The server is busy with other test suites right now. Try again in a few minutes."
+    : null;
+}
+
+/** Whose key a run spends: always the workspace that owns the run's project. */
+function accessFor(run: RunRecord): ModelAccess {
+  const workspaceId = workspaceOfProject(run.projectId);
+  const access = workspaceId ? resolveModelAccess(workspaceId) : null;
+  if (!access) {
+    throw new Error(
+      "No API key is configured for this workspace. Add one in Settings, then retry this stage.",
+    );
+  }
+  return access;
 }
 
 /**
@@ -170,9 +200,10 @@ async function runWave(
   plan: TestPlan,
   requirements: RunRecord["requirements"],
   signal: AbortSignal,
+  access: ModelAccess,
 ): Promise<void> {
-  const writer = makeLlm(64000, signal);
-  const { concurrency } = getConfig();
+  const writer = makeLlm(access, 64000, signal);
+  const { concurrency } = access;
   // Wave 2 reads what wave 1 produced; snapshot before any of them append.
   const snapshot = ctx.all;
 
@@ -216,9 +247,10 @@ async function runReviewStage(
   plan: TestPlan,
   requirements: RunRecord["requirements"],
   signal: AbortSignal,
+  access: ModelAccess,
 ): Promise<void> {
   ctx.mark("reviewer", "running");
-  const reviewer = makeLlm(32000, signal);
+  const reviewer = makeLlm(access, 32000, signal);
   let report = await review(reviewer, ctx.all, requirements, ctx.progress("Reviewer"));
   ctx.log(
     `Reviewer flagged ${report.duplicatesRemoved.length} duplicates and ${report.gapsByDiscipline.length} suites with gaps.`,
@@ -237,8 +269,8 @@ async function runReviewStage(
   }
 
   if (report.gapsByDiscipline.length > 0) {
-    const writer = makeLlm(64000, signal);
-    await pool(report.gapsByDiscipline, getConfig().concurrency, async (gap) => {
+    const writer = makeLlm(access, 64000, signal);
+    await pool(report.gapsByDiscipline, access.concurrency, async (gap) => {
         const spec = AGENTS.find((a) => a.id === gap.discipline);
         if (!spec) return;
         ctx.mark(spec.id, "repairing");
@@ -286,6 +318,8 @@ async function runReviewStage(
 
 /** Runs exactly one stage and persists everything it produced. */
 async function runStage(run: RunRecord, stage: Stage, signal: AbortSignal): Promise<void> {
+  // Resolved per stage, so a key added mid-run is picked up by the retry.
+  const access = accessFor(run);
   const ctx = new RunContext(run);
   ctx.setStatus(STATUS_FOR[stage]);
 
@@ -297,7 +331,7 @@ async function runStage(run: RunRecord, stage: Stage, signal: AbortSignal): Prom
     ctx.mark("planner", "running");
     ctx.log(`Reading ${documents.length} document(s).`);
     const requirements = await extractRequirements(
-      makeLlm(32000, signal),
+      makeLlm(access, 32000, signal),
       documents.map((d) => ({ name: d.name, text: d.text })),
       ctx.progress("Requirement analyst"),
     );
@@ -312,7 +346,7 @@ async function runStage(run: RunRecord, stage: Stage, signal: AbortSignal): Prom
 
   if (stage === "plan") {
     const plan = await buildPlan(
-      makeLlm(32000, signal),
+      makeLlm(access, 32000, signal),
       current.requirements,
       ctx.progress("Test architect"),
     );
@@ -328,14 +362,14 @@ async function runStage(run: RunRecord, stage: Stage, signal: AbortSignal): Prom
   if (!current.plan) throw new Error("No test plan to work from.");
 
   if (stage === "wave1") {
-    await runWave(ctx, WAVE1, current.plan, current.requirements, signal);
+    await runWave(ctx, WAVE1, current.plan, current.requirements, signal, access);
     return;
   }
   if (stage === "wave2") {
-    await runWave(ctx, WAVE2, current.plan, current.requirements, signal);
+    await runWave(ctx, WAVE2, current.plan, current.requirements, signal, access);
     return;
   }
-  await runReviewStage(ctx, current.plan, current.requirements, signal);
+  await runReviewStage(ctx, current.plan, current.requirements, signal, access);
 }
 
 /**

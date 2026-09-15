@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { dataDir } from "./data-dir.ts";
 import type {
   AgentState,
   Edge,
@@ -21,11 +22,7 @@ import type {
   TestPlan,
 } from "@/lib/types";
 
-// Overridable so a worktree, a test, or CI can point at a throwaway database
-// instead of the working copy's real one.
-const DATA_DIR = process.env.BANTAI_DATA_DIR
-  ? path.resolve(process.env.BANTAI_DATA_DIR)
-  : path.join(process.cwd(), "data");
+const DATA_DIR = dataDir();
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // Next dev reloads modules; keep one handle on globalThis so we don't leak connections.
@@ -163,6 +160,85 @@ function getDb(): DatabaseSync {
     CREATE INDEX IF NOT EXISTS idx_requirements_project ON requirements(project_id);
     CREATE INDEX IF NOT EXISTS idx_pending_project ON pending_facts(project_id);
     CREATE INDEX IF NOT EXISTS idx_spans_target ON source_spans(target_kind, target_id);
+
+    -- Accounts and tenancy. A workspace is the tenant: projects belong to one,
+    -- and users reach a project only through a workspace membership.
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('superadmin', 'member')),
+      created_at INTEGER NOT NULL,
+      disabled_at INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS workspaces (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS workspace_members (
+      workspace_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('owner', 'member')),
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (workspace_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_members_user ON workspace_members(user_id);
+    -- id is sha256(cookie token): a leaked database yields no usable sessions.
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      last_seen_at INTEGER NOT NULL,
+      user_agent TEXT,
+      ip TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+    CREATE TABLE IF NOT EXISTS invites (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('superadmin', 'member')),
+      token_hash TEXT NOT NULL UNIQUE,
+      invited_by TEXT,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      accepted_at INTEGER,
+      revoked_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_invites_email ON invites(email);
+    CREATE TABLE IF NOT EXISTS password_resets (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      used_at INTEGER
+    );
+    -- Per-workspace provider settings; apiKey:* values are encrypted at rest.
+    CREATE TABLE IF NOT EXISTS workspace_settings (
+      workspace_id TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      PRIMARY KEY (workspace_id, key)
+    );
+    CREATE TABLE IF NOT EXISTS usage_events (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      user_id TEXT,
+      kind TEXT NOT NULL,
+      platform INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_usage_workspace ON usage_events(workspace_id, kind, created_at);
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id TEXT PRIMARY KEY,
+      actor_id TEXT,
+      action TEXT NOT NULL,
+      target TEXT,
+      created_at INTEGER NOT NULL
+    );
   `);
   migrate(db);
   g.__bantaiDb = db;
@@ -184,6 +260,22 @@ function migrate(db: DatabaseSync): void {
   if (!columns.has("mode")) {
     db.exec("ALTER TABLE runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'step'");
   }
+
+  // Projects predate tenancy. Existing rows get a NULL workspace, which makes
+  // them visible to nobody until the first super admin adopts them.
+  const projectColumns = new Set(
+    (db.prepare("PRAGMA table_info(projects)").all() as { name: string }[]).map(
+      (c) => c.name,
+    ),
+  );
+  if (!projectColumns.has("workspace_id")) {
+    db.exec("ALTER TABLE projects ADD COLUMN workspace_id TEXT");
+  }
+  if (!projectColumns.has("created_by")) {
+    db.exec("ALTER TABLE projects ADD COLUMN created_by TEXT");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_projects_workspace ON projects(workspace_id)");
+
   backfillRequirements(db);
 }
 
@@ -265,6 +357,66 @@ function backfillRequirements(db: DatabaseSync): void {
   ).run(String(Date.now()));
 }
 
+/** The shared connection, for modules (auth) that own their own tables. */
+export function db(): DatabaseSync {
+  return getDb();
+}
+
+// --- per-workspace settings (raw values; encryption is settings.ts's job) ---
+
+export function getWorkspaceSetting(workspaceId: string, key: string): string | null {
+  const row = getDb()
+    .prepare("SELECT value FROM workspace_settings WHERE workspace_id = ? AND key = ?")
+    .get(workspaceId, key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setWorkspaceSetting(workspaceId: string, key: string, value: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO workspace_settings (workspace_id, key, value) VALUES (?, ?, ?)
+       ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value`,
+    )
+    .run(workspaceId, key, value);
+}
+
+export function deleteWorkspaceSetting(workspaceId: string, key: string): void {
+  getDb()
+    .prepare("DELETE FROM workspace_settings WHERE workspace_id = ? AND key = ?")
+    .run(workspaceId, key);
+}
+
+// --- usage, for quotas on the shared platform key ---
+
+export function recordUsageEvent(
+  workspaceId: string,
+  userId: string | null,
+  kind: string,
+  platform: boolean,
+): void {
+  getDb()
+    .prepare(
+      "INSERT INTO usage_events (id, workspace_id, user_id, kind, platform, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .run(randomUUID(), workspaceId, userId, kind, platform ? 1 : 0, Date.now());
+}
+
+export function countUsageSince(
+  workspaceId: string,
+  kind: string,
+  since: number,
+  platformOnly: boolean,
+): number {
+  return (
+    getDb()
+      .prepare(
+        `SELECT count(*) AS n FROM usage_events
+         WHERE workspace_id = ? AND kind = ? AND created_at >= ?${platformOnly ? " AND platform = 1" : ""}`,
+      )
+      .get(workspaceId, kind, since) as { n: number }
+  ).n;
+}
+
 export function getSetting(key: string): string | null {
   const row = getDb().prepare("SELECT value FROM settings WHERE key = ?").get(key) as
     | { value: string }
@@ -286,6 +438,9 @@ export interface ProjectRow {
   id: string;
   name: string;
   created_at: number;
+  /** The owning tenant. NULL only for pre-tenancy rows not yet adopted. */
+  workspace_id: string | null;
+  created_by: string | null;
 }
 
 export interface DocumentRow {
@@ -313,22 +468,43 @@ export interface RunRecord {
   mode: RunMode;
 }
 
-export function createProject(id: string, name: string): ProjectRow {
+/**
+ * A project with no workspace is reachable by nobody — the safe default. Every
+ * route passes the caller's workspace.
+ */
+export function createProject(
+  id: string,
+  name: string,
+  workspaceId: string | null = null,
+  createdBy: string | null = null,
+): ProjectRow {
   const now = Date.now();
-  getDb().prepare("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)").run(
-    id,
-    name,
-    now,
-  );
-  return { id, name, created_at: now };
+  getDb()
+    .prepare(
+      "INSERT INTO projects (id, name, created_at, workspace_id, created_by) VALUES (?, ?, ?, ?, ?)",
+    )
+    .run(id, name, now, workspaceId, createdBy);
+  return { id, name, created_at: now, workspace_id: workspaceId, created_by: createdBy };
 }
 
-export function listProjects(): ProjectRow[] {
+/** Only ever scoped: there is deliberately no "list every project" query. */
+export function listProjects(workspaceId: string): ProjectRow[] {
   return getDb()
-    .prepare("SELECT * FROM projects ORDER BY created_at DESC")
-    .all() as unknown as ProjectRow[];
+    .prepare("SELECT * FROM projects WHERE workspace_id = ? ORDER BY created_at DESC")
+    .all(workspaceId) as unknown as ProjectRow[];
 }
 
+export function workspaceOfProject(projectId: string): string | null {
+  const row = getDb()
+    .prepare("SELECT workspace_id FROM projects WHERE id = ?")
+    .get(projectId) as { workspace_id: string | null } | undefined;
+  return row?.workspace_id ?? null;
+}
+
+/**
+ * Unscoped lookup, for the orchestrator and ingest, which act on ids a route
+ * already authorised. Route handlers must use projectForUser() instead.
+ */
 export function getProject(id: string): ProjectRow | null {
   return (
     (getDb().prepare("SELECT * FROM projects WHERE id = ?").get(id) as

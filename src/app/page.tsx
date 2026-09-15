@@ -22,6 +22,11 @@ import type {
   TestPlan,
 } from "@/lib/types";
 
+interface Me {
+  user: { id: string; email: string; name: string; role: "superadmin" | "member" };
+  workspace: { id: string; name: string };
+}
+
 interface ProjectSummary {
   id: string;
   name: string;
@@ -71,6 +76,7 @@ const EXPORTS = [
 ];
 
 export default function Home() {
+  const [me, setMe] = useState<Me | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [run, setRun] = useState<RunView | null>(null);
@@ -93,24 +99,43 @@ export default function Home() {
   const running = run ? isActiveRun(run.status) : false;
   const activeProvider =
     settings?.providers.find((p) => p.id === settings.provider) ?? null;
+  // Your own key, or the operator's shared one — either lets a run start.
+  const onPlatformKey = Boolean(settings?.platform && !activeProvider?.hasKey);
+  const canRun = Boolean(activeProvider?.hasKey || settings?.platform);
   const paused = run?.status === "paused";
   // A failed run that still knows which stage broke can be retried from there.
   const resumable = paused || (run?.status === "failed" && Boolean(run.nextStage));
 
   const loadProjects = useCallback(async () => {
-    const data = await fetch("/api/projects").then((r) => r.json());
+    const response = await fetch("/api/projects");
+    if (!response.ok) return [] as ProjectSummary[];
+    const data = await response.json();
     setProjects(data.projects);
     return data.projects as ProjectSummary[];
   }, []);
 
+  // Nothing loads until the session is confirmed; a stale or missing one goes
+  // to the login page instead of rendering an app that can't fetch anything.
   useEffect(() => {
-    void fetch("/api/settings")
-      .then((r) => r.json())
-      .then(setSettings);
-    void loadProjects().then((list) => {
+    void (async () => {
+      const response = await fetch("/api/auth/me").catch(() => null);
+      if (!response?.ok) {
+        window.location.replace("/login");
+        return;
+      }
+      setMe((await response.json()) as Me);
+      void fetch("/api/settings")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((s) => s && setSettings(s));
+      const list = await loadProjects();
       if (list.length > 0) setActiveId((current) => current ?? list[0].id);
-    });
+    })();
   }, [loadProjects]);
+
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    window.location.replace("/login");
+  }
 
   const attach = useCallback((runId: string) => {
     sourceRef.current?.close();
@@ -345,15 +370,41 @@ export default function Home() {
             {creating ? <Spinner /> : null} Create
           </Button>
           <Button size="sm" variant="ghost" onClick={() => setSettingsOpen(true)}>
-            {activeProvider?.hasKey ? "Settings" : "Add API key"}
+            {canRun ? "Settings" : "Add API key"}
           </Button>
+          {me?.user.role === "superadmin" ? (
+            <a
+              href="/admin"
+              className="rounded-lg px-2.5 py-1 text-xs font-medium text-ink-soft hover:bg-canvas hover:text-ink"
+            >
+              Admin
+            </a>
+          ) : null}
+          {me ? (
+            <div className="flex items-center gap-2 border-l border-line pl-3">
+              <span className="hidden text-xs text-ink-faint sm:inline" title={me.user.email}>
+                {me.user.name}
+              </span>
+              <Button size="sm" variant="ghost" onClick={() => void logout()}>
+                Log out
+              </Button>
+            </div>
+          ) : null}
         </div>
       </header>
 
-      {settings && !activeProvider?.hasKey ? (
+      {settings && !canRun ? (
         <p className="mt-4 rounded-lg bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300">
           No {activeProvider?.label ?? "provider"} API key yet. Add one in settings before
           starting a run.
+        </p>
+      ) : null}
+
+      {onPlatformKey && settings?.platform ? (
+        <p className="mt-4 rounded-lg bg-accent-soft px-3 py-2 text-sm text-accent">
+          You&rsquo;re on the shared key: {Math.max(0, settings.platform.dailyRuns - settings.platform.runsUsedToday)} of{" "}
+          {settings.platform.dailyRuns} test-case runs left today. Add your own key in Settings to
+          remove the limit.
         </p>
       ) : null}
 
@@ -399,7 +450,7 @@ export default function Home() {
                       size="sm"
                       variant="primary"
                       onClick={() => void start()}
-                      disabled={starting || docCount === 0 || !activeProvider?.hasKey}
+                      disabled={starting || docCount === 0 || !canRun}
                     >
                       {starting ? <Spinner /> : null}
                       {run ? "Run again" : "Generate test cases"}
