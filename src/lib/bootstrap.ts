@@ -18,7 +18,7 @@ function checkStorage(): boolean {
     fs.accessSync(dir, fs.constants.W_OK);
   } catch {
     console.error(
-      `[bootstrap] Can't write to ${dir}, where the database lives. On Railway, set RAILWAY_RUN_UID=0 so the app can write to the attached volume; elsewhere, make ${dir} writable by the app's user.`,
+      `[bootstrap] Can't write to ${dir}, where the database lives. The image's entrypoint should already have fixed this by claiming ${dir} for the app's user on startup — if you're seeing this, either the deploy predates that fix (redeploy from the latest commit) or nothing is actually mounted at ${dir} (check the volume's mount path matches exactly).`,
     );
     return false;
   }
