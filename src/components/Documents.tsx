@@ -1,19 +1,59 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Card, CardHead, Spinner } from "@/components/ui";
+import { Badge, Button, Card, CardHead, Spinner } from "@/components/ui";
+
+type DocStatus = "pending" | "ingesting" | "ingested" | "failed";
 
 interface Doc {
   id: string;
   name: string;
   bytes: number;
   chars: number;
+  status: DocStatus;
+  error: string | null;
+  entityCount: number | null;
+  edgeCount: number | null;
+}
+
+/** A file mid-upload — not a document yet, just a row so it isn't invisible while it's being read and parsed. */
+interface UploadingFile {
+  key: string;
+  name: string;
+  size: number;
+}
+
+/** A document whose pipeline pass hasn't finished (even once) can't be removed yet. */
+function isDeletable(status: DocStatus): boolean {
+  return status === "ingested" || status === "failed";
 }
 
 function humanBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function StatusBadge({ doc }: { doc: Doc }) {
+  switch (doc.status) {
+    case "pending":
+      return <Badge tone="neutral">Not yet analyzed</Badge>;
+    case "ingesting":
+      return (
+        <Badge tone="accent">
+          <Spinner className="mr-1" />
+          Analyzing…
+        </Badge>
+      );
+    case "ingested":
+      return (
+        <Badge tone="good">
+          {doc.entityCount ?? 0} entities · {doc.edgeCount ?? 0} relationships
+        </Badge>
+      );
+    case "failed":
+      return <Badge tone="bad">Analysis failed</Badge>;
+  }
 }
 
 export function Documents({
@@ -28,6 +68,7 @@ export function Documents({
 }) {
   const [docs, setDocs] = useState<Doc[]>([]);
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState<UploadingFile[]>([]);
   const [dragging, setDragging] = useState(false);
   const [problems, setProblems] = useState<{ name: string; reason: string }[]>([]);
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -45,31 +86,51 @@ export function Documents({
     void load();
   }, [load]);
 
+  // While any document is mid-pipeline, keep polling for it to finish — that
+  // is what flips its badge from "Analyzing…" to a result and unblocks its
+  // delete button, whether this tab or another one started the build.
+  useEffect(() => {
+    if (!docs.some((d) => d.status === "ingesting")) return;
+    const timer = setTimeout(() => void load(), 2000);
+    return () => clearTimeout(timer);
+  }, [docs, load]);
+
   // A run may start (in another tab, or between render and click) after this
   // was disabled client-side — the server enforces the same rule, so surface
   // its refusal the same way an upload/parse failure would show up.
   async function upload(files: FileList | File[]) {
     if (files.length === 0 || locked) return;
+    const picked = Array.from(files);
+    // Optimistic rows so a large PDF/docx being parsed isn't just a spinner on
+    // the Add button — the files that are in flight are visible immediately.
+    setUploading(
+      picked.map((f, i) => ({ key: `${Date.now()}-${i}`, name: f.name, size: f.size })),
+    );
     setBusy(true);
     setProblems([]);
-    const form = new FormData();
-    for (const file of Array.from(files)) form.append("files", file);
-    const response = await fetch(`/api/projects/${projectId}/documents`, {
-      method: "POST",
-      body: form,
-    });
-    const result = await response.json().catch(() => ({}));
-    setBusy(false);
-    if (!response.ok) {
-      setProblems([{ name: "Upload", reason: result.error ?? "The upload was rejected." }]);
-      return;
+    try {
+      const form = new FormData();
+      for (const file of picked) form.append("files", file);
+      const response = await fetch(`/api/projects/${projectId}/documents`, {
+        method: "POST",
+        body: form,
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setProblems([{ name: "Upload", reason: result.error ?? "The upload was rejected." }]);
+        return;
+      }
+      if (result.failed?.length) setProblems(result.failed);
+      await load();
+    } finally {
+      setUploading([]);
+      setBusy(false);
     }
-    if (result.failed?.length) setProblems(result.failed);
-    await load();
   }
 
   async function remove(id: string) {
-    if (locked) return;
+    const doc = docs.find((d) => d.id === id);
+    if (locked || !doc || !isDeletable(doc.status)) return;
     // Extracted text is not recoverable once the row is gone, and the upload took
     // real effort — never delete on a single click.
     if (confirming !== id) {
@@ -77,7 +138,6 @@ export function Documents({
       return;
     }
     setConfirming(null);
-    const doc = docs.find((d) => d.id === id);
     const response = await fetch(`/api/documents/${id}`, { method: "DELETE" });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
@@ -135,37 +195,70 @@ export function Documents({
         }}
         className={`px-4 py-3 ${dragging && !locked ? "bg-accent-soft" : ""}`}
       >
-        {docs.length === 0 ? (
+        {docs.length === 0 && uploading.length === 0 ? (
           <p className="py-6 text-center text-sm text-ink-faint">
             Drop the PRD, specs, user stories and acceptance criteria here.
           </p>
         ) : (
-          <ul className="divide-y divide-line">
-            {docs.map((doc) => (
-              <li key={doc.id} className="flex items-center gap-3 py-2">
+          // A fixed max-height so the card stops growing once a project holds
+          // more than a handful of documents — 10, 50 or all 100 the project
+          // allows scroll inside this box instead of pushing the rest of the
+          // page down. Under that height (a handful of documents) the content
+          // is shorter than the box, so no scrollbar appears at all.
+          <ul className="max-h-96 divide-y divide-line overflow-y-auto">
+            {uploading.map((f) => (
+              <li key={f.key} className="flex items-center gap-3 py-2">
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm text-ink">{doc.name}</p>
-                  <p className="text-xs text-ink-faint">
-                    {humanBytes(doc.bytes)} · {doc.chars.toLocaleString()} characters
-                    extracted
-                  </p>
+                  <p className="truncate text-sm text-ink">{f.name}</p>
+                  <p className="text-xs text-ink-faint">{humanBytes(f.size)}</p>
                 </div>
-                <Button
-                  size="sm"
-                  variant={confirming === doc.id ? "primary" : "ghost"}
-                  onClick={() => void remove(doc.id)}
-                  onBlur={() => setConfirming((c) => (c === doc.id ? null : c))}
-                  disabled={locked}
-                  aria-label={
-                    confirming === doc.id
-                      ? `Confirm removing ${doc.name}`
-                      : `Remove ${doc.name}`
-                  }
-                >
-                  {confirming === doc.id ? "Confirm" : "Remove"}
-                </Button>
+                <Badge tone="accent">
+                  <Spinner className="mr-1" />
+                  Uploading…
+                </Badge>
               </li>
             ))}
+            {docs.map((doc) => {
+              const deletable = isDeletable(doc.status);
+              return (
+                <li key={doc.id} className="flex items-center gap-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm text-ink">{doc.name}</p>
+                    <p className="text-xs text-ink-faint">
+                      {humanBytes(doc.bytes)} · {doc.chars.toLocaleString()} characters
+                      extracted
+                    </p>
+                    {doc.status === "failed" && doc.error ? (
+                      <p className="mt-0.5 truncate text-xs text-red-600" title={doc.error}>
+                        {doc.error}
+                      </p>
+                    ) : null}
+                  </div>
+                  <StatusBadge doc={doc} />
+                  <Button
+                    size="sm"
+                    variant={confirming === doc.id ? "primary" : "ghost"}
+                    onClick={() => void remove(doc.id)}
+                    onBlur={() => setConfirming((c) => (c === doc.id ? null : c))}
+                    disabled={locked || !deletable}
+                    title={
+                      locked || deletable
+                        ? undefined
+                        : doc.status === "ingesting"
+                          ? "Being analyzed by the AI pipeline — wait for it to finish."
+                          : "Build the product model at least once before removing this document."
+                    }
+                    aria-label={
+                      confirming === doc.id
+                        ? `Confirm removing ${doc.name}`
+                        : `Remove ${doc.name}`
+                    }
+                  >
+                    {confirming === doc.id ? "Confirm" : "Remove"}
+                  </Button>
+                </li>
+              );
+            })}
           </ul>
         )}
 

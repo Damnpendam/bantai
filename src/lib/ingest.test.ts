@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "bantai-ingest-"));
 process.env.BANTAI_DATA_DIR = tmp;
 const store = await import("./store.ts");
-const { ingestDocument } = await import("./ingest.ts");
+const { ingestDocument, ingestProject, isDocumentIngesting } = await import("./ingest.ts");
 
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
@@ -242,4 +242,56 @@ test("a changed document retires what it no longer says and adds what it now say
   // Its endpoints show up as changed, so impact traversal will start from them.
   const order = store.listEntities(projectId).find((e) => e.name === "Order")!;
   assert.ok(redo.changedEntityIds.includes(order.id));
+});
+
+test("ingestProject: one document's failure does not abort the rest of the batch", async () => {
+  const projectId = randomUUID();
+  store.createProject(projectId, "Shop");
+  const badId = randomUUID();
+  store.addDocument({
+    id: badId,
+    project_id: projectId,
+    name: "bad.md",
+    bytes: 10,
+    text: "irrelevant — the model is scripted",
+  });
+  const goodId = randomUUID();
+  store.addDocument({
+    id: goodId,
+    project_id: projectId,
+    name: "good.md",
+    bytes: 10,
+    text: "irrelevant — the model is scripted",
+  });
+
+  const llm = {
+    async json(args: { prompt: string }) {
+      if (args.prompt.includes('name="bad.md"')) throw new Error("model exploded");
+      return EXTRACTION;
+    },
+  } as unknown as NonNullable<Parameters<typeof ingestDocument>[1]>["llm"];
+
+  const summaries = await ingestProject(projectId, { llm });
+
+  assert.equal(summaries.length, 2);
+  const bad = summaries.find((s) => s.documentId === badId)!;
+  const good = summaries.find((s) => s.documentId === goodId)!;
+  assert.equal(bad.error, "model exploded");
+  assert.equal(bad.entitiesCreated, 0);
+  assert.equal(good.error, null);
+  assert.equal(
+    good.entitiesCreated,
+    3,
+    "the document after the failed one still ingests instead of the batch aborting",
+  );
+  assert.equal(store.listEntities(projectId).length, 3);
+
+  // The delete-button gate reads exactly these two things.
+  assert.equal(isDocumentIngesting(badId), false, "in-flight tracking clears once it fails");
+  assert.equal(isDocumentIngesting(goodId), false, "in-flight tracking clears once it succeeds");
+  const badRow = store.getDocumentIngest(badId)!;
+  assert.equal(badRow.status, "failed");
+  assert.equal(badRow.error, "model exploded");
+  const goodRow = store.getDocumentIngest(goodId)!;
+  assert.equal(goodRow.status, "ingested");
 });
