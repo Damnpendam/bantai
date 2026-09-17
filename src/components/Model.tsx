@@ -57,6 +57,7 @@ interface Summary {
   edgesDuplicate: number;
   edgesPending: number;
   supersededEdges: EdgeRef[];
+  error: string | null;
 }
 
 interface ImpactView {
@@ -245,18 +246,27 @@ export function Model({
             {result.summaries.map((s) => (
               <li key={s.documentName}>
                 <span className="text-ink">{s.documentName}</span>:{" "}
-                {s.skipped
-                  ? "already ingested — no change"
-                  : `+${s.entitiesCreated} entities, +${s.edgesAdded} relationships` +
-                    (s.entitiesAmbiguous || s.edgesPending
-                      ? `, ${s.entitiesAmbiguous + s.edgesPending} sent to pending`
-                      : "") +
-                    (s.supersededEdges.length
-                      ? `, ${s.supersededEdges.length} retired`
-                      : "")}
+                {s.error ? (
+                  <span className="text-red-600">failed — {s.error}</span>
+                ) : s.skipped ? (
+                  "already ingested — no change"
+                ) : (
+                  `+${s.entitiesCreated} entities, +${s.edgesAdded} relationships` +
+                  (s.entitiesAmbiguous || s.edgesPending
+                    ? `, ${s.entitiesAmbiguous + s.edgesPending} sent to pending`
+                    : "") +
+                  (s.supersededEdges.length ? `, ${s.supersededEdges.length} retired` : "")
+                )}
               </li>
             ))}
           </ul>
+          {result.summaries.some((s) => s.error) ? (
+            <p className="mt-1.5 text-xs text-red-600">
+              {result.summaries.filter((s) => s.error).length} of {result.summaries.length}{" "}
+              document{result.summaries.length > 1 ? "s" : ""} failed to build — the rest of
+              the model above still reflects what did succeed. Rebuild to retry.
+            </p>
+          ) : null}
           {result.impact && result.impact.affected.length > 0 ? (
             <p className="mt-1.5">
               <span className="text-ink-faint">Touches: </span>

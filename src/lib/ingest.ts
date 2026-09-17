@@ -18,6 +18,7 @@ import {
   listAllEdges,
   listDocuments,
   listEntities,
+  markDocumentFailed,
   markDocumentIngested,
   supersedeEdge,
   upsertEntity,
@@ -56,10 +57,70 @@ export interface IngestSummary {
   supersededEdges: EdgeRef[];
   /** Entities this ingest created or newly connected — the seeds for impact. */
   changedEntityIds: string[];
+  /** Set when this document's own ingest failed — everything above is empty. */
+  error: string | null;
+}
+
+/** A summary shape for a document that was never ingested — optionally because it failed. */
+export function emptySummary(document: DocumentRow, error: string | null = null): IngestSummary {
+  return {
+    documentId: document.id,
+    documentName: document.name,
+    skipped: false,
+    entitiesCreated: 0,
+    entitiesMatched: 0,
+    entitiesAmbiguous: 0,
+    edgesAdded: 0,
+    edgesDuplicate: 0,
+    edgesPending: 0,
+    addedEdges: [],
+    supersededEdges: [],
+    changedEntityIds: [],
+    error,
+  };
 }
 
 function nameKey(s: string): string {
   return s.trim().toLowerCase();
+}
+
+/**
+ * Documents currently inside `ingestOne`, in this process. Process-local is
+ * fine — it only needs to answer "is the pipeline reading this document's
+ * text right now", to gate its delete button and drive the "Analyzing…"
+ * status; a restart naturally clears it, which is the correct answer too
+ * (nothing is running).
+ */
+const inFlight = new Set<string>();
+
+export function isDocumentIngesting(documentId: string): boolean {
+  return inFlight.has(documentId);
+}
+
+/**
+ * Runs `ingestOne` with in-flight tracking and, on failure, records it so the
+ * document is treated as "attempted" (its delete button unblocks) even though
+ * this pass didn't succeed, and the reason survives a page refresh.
+ */
+async function ingestOneTracked(
+  document: DocumentRow,
+  force: boolean,
+  llm: Llm,
+): Promise<IngestSummary> {
+  inFlight.add(document.id);
+  try {
+    return await ingestOne(document, force, llm);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    markDocumentFailed({
+      documentId: document.id,
+      projectId: document.project_id,
+      error: message,
+    });
+    throw error;
+  } finally {
+    inFlight.delete(document.id);
+  }
 }
 
 /**
@@ -86,20 +147,7 @@ async function ingestOne(
   force: boolean,
   llm: Llm,
 ): Promise<IngestSummary> {
-  const base: IngestSummary = {
-    documentId: document.id,
-    documentName: document.name,
-    skipped: false,
-    entitiesCreated: 0,
-    entitiesMatched: 0,
-    entitiesAmbiguous: 0,
-    edgesAdded: 0,
-    edgesDuplicate: 0,
-    edgesPending: 0,
-    addedEdges: [],
-    supersededEdges: [],
-    changedEntityIds: [],
-  };
+  const base: IngestSummary = emptySummary(document);
   const changed = new Set<string>();
 
   if (getDocumentIngest(document.id) && !force) {
@@ -338,12 +386,19 @@ export async function ingestDocument(
 ): Promise<IngestSummary> {
   const document = getDocument(documentId);
   if (!document) throw new Error("No such document.");
-  return ingestOne(document, force, llm);
+  return ingestOneTracked(document, force, llm);
 }
 
 /**
  * Ingest every document in a project. Sequential on purpose: each document is
  * resolved against the entities the previous ones just created.
+ *
+ * One document's failure (a stalled or malformed model call, most often) does
+ * not abort the rest of the batch — every document already ingested before it
+ * stays in the model, and every document after it still gets a chance. Without
+ * this, one bad document in a large upload silently truncates the product
+ * model to whatever ingested before the failure, with only a generic error to
+ * show for it.
  */
 export async function ingestProject(
   projectId: string,
@@ -351,7 +406,13 @@ export async function ingestProject(
 ): Promise<IngestSummary[]> {
   const out: IngestSummary[] = [];
   for (const document of listDocuments(projectId)) {
-    out.push(await ingestOne(document, force, llm));
+    try {
+      out.push(await ingestOneTracked(document, force, llm));
+    } catch (error) {
+      out.push(
+        emptySummary(document, error instanceof Error ? error.message : String(error)),
+      );
+    }
   }
   return out;
 }

@@ -162,6 +162,44 @@ test("entities: upsert is idempotent and aliases dedupe", () => {
   assert.deepEqual(list[0].aliases, ["basket checkout"]);
 });
 
+test("document ingests: a failure is recorded, and a later success clears it", () => {
+  const p = "ingest-status";
+  const docId = "doc-1";
+
+  assert.equal(store.getDocumentIngest(docId), null, "never attempted");
+
+  store.markDocumentFailed({ documentId: docId, projectId: p, error: "model exploded" });
+  let row = store.getDocumentIngest(docId)!;
+  assert.equal(row.status, "failed");
+  assert.equal(row.error, "model exploded");
+  assert.equal(row.entityCount, 0);
+
+  // A retry that succeeds replaces the failure, not just adds to it.
+  store.markDocumentIngested({ documentId: docId, projectId: p, entityCount: 3, edgeCount: 2, pendingCount: 0 });
+  row = store.getDocumentIngest(docId)!;
+  assert.equal(row.status, "ingested");
+  assert.equal(row.error, null);
+  assert.equal(row.entityCount, 3);
+
+  const byProject = store.listDocumentIngests(p);
+  assert.equal(byProject.size, 1);
+  assert.equal(byProject.get(docId)!.status, "ingested");
+});
+
+test("deleteDocument also drops its ingest bookkeeping", () => {
+  const p = "delete-cascade";
+  store.createProject(p, "Shop");
+  const docId = "doc-2";
+  store.addDocument({ id: docId, project_id: p, name: "a.md", bytes: 1, text: "x" });
+  store.markDocumentIngested({ documentId: docId, projectId: p, entityCount: 1, edgeCount: 0, pendingCount: 0 });
+  assert.ok(store.getDocumentIngest(docId));
+
+  store.deleteDocument(docId);
+
+  assert.equal(store.getDocument(docId), null);
+  assert.equal(store.getDocumentIngest(docId), null);
+});
+
 test("pending facts: open worklist, then resolved", () => {
   const p = "pending";
   const id = store.addPendingFact({

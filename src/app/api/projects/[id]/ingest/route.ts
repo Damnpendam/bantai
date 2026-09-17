@@ -7,7 +7,7 @@ import {
   resolveModelAccess,
 } from "@/lib/settings";
 import { makeLlm } from "@/lib/llm-config";
-import { ingestDocument, ingestProject } from "@/lib/ingest";
+import { emptySummary, ingestDocument, ingestProject } from "@/lib/ingest";
 import { impactReport, listConflicts, listEdgesHydrated } from "@/lib/impact";
 import {
   api,
@@ -67,10 +67,20 @@ export const POST = api(async (request: Request, { params }: Params) => {
   if (overQuota) throw new HttpError(429, overQuota);
 
   const llm = makeLlm(access, 32000, undefined, "low");
-  const summaries = documentId
-    ? [await ingestDocument(documentId, { force, llm })]
-    : await ingestProject(id, { force, llm });
-  if (summaries.some((s) => !s.skipped)) {
+  let summaries: Awaited<ReturnType<typeof ingestProject>>;
+  if (documentId) {
+    try {
+      summaries = [await ingestDocument(documentId, { force, llm })];
+    } catch (error) {
+      const failed = requireDocument(ctx, documentId).document;
+      summaries = [
+        emptySummary(failed, error instanceof Error ? error.message : String(error)),
+      ];
+    }
+  } else {
+    summaries = await ingestProject(id, { force, llm });
+  }
+  if (summaries.some((s) => !s.skipped && !s.error)) {
     recordUsage(workspaceId, ctx.user.id, "ingest", access);
   }
 

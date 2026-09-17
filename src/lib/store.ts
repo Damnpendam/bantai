@@ -276,6 +276,22 @@ function migrate(db: DatabaseSync): void {
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_projects_workspace ON projects(workspace_id)");
 
+  // Ingest rows used to exist only on success. A failed attempt now leaves a
+  // row too, so a document's delete button can tell "never touched the
+  // pipeline" apart from "the pipeline tried and failed" — existing rows all
+  // predate this column and were, by definition, successes.
+  const ingestColumns = new Set(
+    (db.prepare("PRAGMA table_info(document_ingests)").all() as { name: string }[]).map(
+      (c) => c.name,
+    ),
+  );
+  if (!ingestColumns.has("status")) {
+    db.exec("ALTER TABLE document_ingests ADD COLUMN status TEXT NOT NULL DEFAULT 'ingested'");
+  }
+  if (!ingestColumns.has("error")) {
+    db.exec("ALTER TABLE document_ingests ADD COLUMN error TEXT");
+  }
+
   backfillRequirements(db);
 }
 
@@ -534,7 +550,12 @@ export function getDocument(id: string): DocumentRow | null {
 }
 
 export function deleteDocument(id: string): void {
-  getDb().prepare("DELETE FROM documents WHERE id = ?").run(id);
+  const db = getDb();
+  db.prepare("DELETE FROM documents WHERE id = ?").run(id);
+  // Bookkeeping keyed by this document id would otherwise dangle forever —
+  // harmless (it's never joined against a document that no longer lists),
+  // but there is no reason to keep it.
+  db.prepare("DELETE FROM document_ingests WHERE document_id = ?").run(id);
 }
 
 function toRun(row: Record<string, unknown>): RunRecord {
@@ -860,24 +881,29 @@ export function findLiveEdge(
 }
 
 // --- ingestion bookkeeping ---
+//
+// A row here means "the pipeline has attempted this document at least once" —
+// on success (status 'ingested') or on a definitive failure (status 'failed',
+// with the error kept for display). No row at all means it has never been
+// attempted. That three-way split is what a document's delete button gates on.
 
 export interface DocumentIngest {
   documentId: string;
   projectId: string;
+  status: "ingested" | "failed";
+  error: string | null;
   ingestedAt: number;
   entityCount: number;
   edgeCount: number;
   pendingCount: number;
 }
 
-export function getDocumentIngest(documentId: string): DocumentIngest | null {
-  const row = getDb()
-    .prepare("SELECT * FROM document_ingests WHERE document_id = ?")
-    .get(documentId) as Record<string, unknown> | undefined;
-  if (!row) return null;
+function toDocumentIngest(row: Record<string, unknown>): DocumentIngest {
   return {
     documentId: row.document_id as string,
     projectId: row.project_id as string,
+    status: (row.status as DocumentIngest["status"]) ?? "ingested",
+    error: (row.error as string | null) ?? null,
     ingestedAt: row.ingested_at as number,
     entityCount: row.entity_count as number,
     edgeCount: row.edge_count as number,
@@ -885,17 +911,36 @@ export function getDocumentIngest(documentId: string): DocumentIngest | null {
   };
 }
 
-export function markDocumentIngested(i: Omit<DocumentIngest, "ingestedAt">): void {
+export function getDocumentIngest(documentId: string): DocumentIngest | null {
+  const row = getDb()
+    .prepare("SELECT * FROM document_ingests WHERE document_id = ?")
+    .get(documentId) as Record<string, unknown> | undefined;
+  return row ? toDocumentIngest(row) : null;
+}
+
+/** Every attempted document in a project, keyed by document id. */
+export function listDocumentIngests(projectId: string): Map<string, DocumentIngest> {
+  const rows = getDb()
+    .prepare("SELECT * FROM document_ingests WHERE project_id = ?")
+    .all(projectId) as Record<string, unknown>[];
+  return new Map(rows.map((row) => [row.document_id as string, toDocumentIngest(row)]));
+}
+
+export function markDocumentIngested(
+  i: Omit<DocumentIngest, "ingestedAt" | "status" | "error">,
+): void {
   getDb()
     .prepare(
       `INSERT INTO document_ingests
-         (document_id, project_id, ingested_at, entity_count, edge_count, pending_count)
-       VALUES (?, ?, ?, ?, ?, ?)
+         (document_id, project_id, ingested_at, entity_count, edge_count, pending_count, status, error)
+       VALUES (?, ?, ?, ?, ?, ?, 'ingested', NULL)
        ON CONFLICT(document_id) DO UPDATE SET
          ingested_at = excluded.ingested_at,
          entity_count = excluded.entity_count,
          edge_count = excluded.edge_count,
-         pending_count = excluded.pending_count`,
+         pending_count = excluded.pending_count,
+         status = 'ingested',
+         error = NULL`,
     )
     .run(
       i.documentId,
@@ -905,6 +950,28 @@ export function markDocumentIngested(i: Omit<DocumentIngest, "ingestedAt">): voi
       i.edgeCount,
       i.pendingCount,
     );
+}
+
+/** Records a definitive failure so the document is treated as "attempted" and its error survives a refresh. */
+export function markDocumentFailed(i: {
+  documentId: string;
+  projectId: string;
+  error: string;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO document_ingests
+         (document_id, project_id, ingested_at, entity_count, edge_count, pending_count, status, error)
+       VALUES (?, ?, ?, 0, 0, 0, 'failed', ?)
+       ON CONFLICT(document_id) DO UPDATE SET
+         ingested_at = excluded.ingested_at,
+         entity_count = 0,
+         edge_count = 0,
+         pending_count = 0,
+         status = 'failed',
+         error = excluded.error`,
+    )
+    .run(i.documentId, i.projectId, Date.now(), i.error);
 }
 
 export function clearDocumentIngest(documentId: string): void {

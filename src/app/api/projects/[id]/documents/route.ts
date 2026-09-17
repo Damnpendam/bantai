@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import { addDocument, latestRun, listDocuments } from "@/lib/store";
+import { addDocument, latestRun, listDocumentIngests, listDocuments } from "@/lib/store";
 import { parseDocument } from "@/lib/parse";
+import { isDocumentIngesting } from "@/lib/ingest";
 import { isActiveRun } from "@/lib/types";
 import { api, HttpError, requireProject, requireUser } from "@/lib/http";
 
@@ -16,13 +17,24 @@ export const GET = api(async (_request: Request, { params }: Params) => {
   const ctx = await requireUser();
   const { id } = await params;
   requireProject(ctx, id);
-  const documents = listDocuments(id).map((d) => ({
-    id: d.id,
-    name: d.name,
-    bytes: d.bytes,
-    created_at: d.created_at,
-    chars: d.text.length,
-  }));
+  const ingests = listDocumentIngests(id);
+  const documents = listDocuments(id).map((d) => {
+    const ingest = ingests.get(d.id);
+    return {
+      id: d.id,
+      name: d.name,
+      bytes: d.bytes,
+      created_at: d.created_at,
+      chars: d.text.length,
+      // "ingesting" wins even over a completed row: a rebuild clears the row
+      // for the moment it re-reads the document, which is exactly when the
+      // delete button must stay blocked.
+      status: isDocumentIngesting(d.id) ? "ingesting" : (ingest?.status ?? "pending"),
+      error: ingest?.error ?? null,
+      entityCount: ingest?.entityCount ?? null,
+      edgeCount: ingest?.edgeCount ?? null,
+    };
+  });
   return NextResponse.json({ documents });
 });
 
