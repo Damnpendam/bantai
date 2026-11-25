@@ -239,6 +239,40 @@ function getDb(): DatabaseSync {
       target TEXT,
       created_at INTEGER NOT NULL
     );
+
+    -- Retrieval index over uploaded documents. Children are what gets searched;
+    -- the parent a child came from is what gets read. Derived data: it can be
+    -- dropped and rebuilt from documents.text at any time.
+    CREATE TABLE IF NOT EXISTS rag_documents (
+      document_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      text_hash TEXT NOT NULL,
+      parent_count INTEGER NOT NULL,
+      child_count INTEGER NOT NULL,
+      indexed_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS rag_parents (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      document_id TEXT NOT NULL,
+      ord INTEGER NOT NULL,
+      heading TEXT NOT NULL DEFAULT '',
+      text TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS rag_children (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      document_id TEXT NOT NULL,
+      parent_id TEXT NOT NULL,
+      ord INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      embedding BLOB,
+      embed_model TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_rag_documents_project ON rag_documents(project_id);
+    CREATE INDEX IF NOT EXISTS idx_rag_parents_project ON rag_parents(project_id);
+    CREATE INDEX IF NOT EXISTS idx_rag_children_project ON rag_children(project_id);
+    CREATE INDEX IF NOT EXISTS idx_rag_children_document ON rag_children(document_id);
   `);
   migrate(db);
   g.__bantaiDb = db;
@@ -525,6 +559,13 @@ export function listDocuments(projectId: string): DocumentRow[] {
     .all(projectId) as unknown as DocumentRow[];
 }
 
+/** Names only — listDocuments drags every document's full text along. */
+export function listDocumentNames(projectId: string): { id: string; name: string }[] {
+  return getDb()
+    .prepare("SELECT id, name FROM documents WHERE project_id = ?")
+    .all(projectId) as unknown as { id: string; name: string }[];
+}
+
 export function getDocument(id: string): DocumentRow | null {
   return (
     (getDb().prepare("SELECT * FROM documents WHERE id = ?").get(id) as
@@ -534,7 +575,205 @@ export function getDocument(id: string): DocumentRow | null {
 }
 
 export function deleteDocument(id: string): void {
+  const doc = getDocument(id);
   getDb().prepare("DELETE FROM documents WHERE id = ?").run(id);
+  if (doc) {
+    deleteDocumentChunks(id);
+    bumpRagVersion(doc.project_id);
+  }
+}
+
+// --- retrieval index ---
+
+const ragVersions: Map<string, number> = ((
+  globalThis as unknown as { __bantaiRagVersions?: Map<string, number> }
+).__bantaiRagVersions ??= new Map());
+
+/** Changes whenever a project's index does, so cached search structures know to rebuild. */
+export function ragVersion(projectId: string): number {
+  return ragVersions.get(projectId) ?? 0;
+}
+
+function bumpRagVersion(projectId: string): void {
+  ragVersions.set(projectId, ragVersion(projectId) + 1);
+}
+
+function inTransaction(work: () => void): void {
+  const db = getDb();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    work();
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export interface RagDocState {
+  document_id: string;
+  text_hash: string;
+  child_count: number;
+}
+
+export function ragDocStates(projectId: string): RagDocState[] {
+  return getDb()
+    .prepare("SELECT document_id, text_hash, child_count FROM rag_documents WHERE project_id = ?")
+    .all(projectId) as unknown as RagDocState[];
+}
+
+export function countRagChildren(projectId: string): number {
+  return (
+    getDb()
+      .prepare("SELECT count(*) AS n FROM rag_children WHERE project_id = ?")
+      .get(projectId) as { n: number }
+  ).n;
+}
+
+export function replaceDocumentChunks(
+  projectId: string,
+  documentId: string,
+  hash: string,
+  parents: { id: string; ord: number; heading: string; text: string }[],
+  children: { id: string; parentId: string; ord: number; text: string }[],
+): void {
+  const db = getDb();
+  inTransaction(() => {
+    db.prepare("DELETE FROM rag_children WHERE document_id = ?").run(documentId);
+    db.prepare("DELETE FROM rag_parents WHERE document_id = ?").run(documentId);
+    db.prepare("DELETE FROM rag_documents WHERE document_id = ?").run(documentId);
+    const addParent = db.prepare(
+      "INSERT INTO rag_parents (id, project_id, document_id, ord, heading, text) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    for (const p of parents) addParent.run(p.id, projectId, documentId, p.ord, p.heading, p.text);
+    const addChild = db.prepare(
+      "INSERT INTO rag_children (id, project_id, document_id, parent_id, ord, text) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    for (const c of children) addChild.run(c.id, projectId, documentId, c.parentId, c.ord, c.text);
+    db.prepare(
+      "INSERT INTO rag_documents (document_id, project_id, text_hash, parent_count, child_count, indexed_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(documentId, projectId, hash, parents.length, children.length, Date.now());
+  });
+  bumpRagVersion(projectId);
+}
+
+export function deleteDocumentChunks(documentId: string): void {
+  const db = getDb();
+  inTransaction(() => {
+    db.prepare("DELETE FROM rag_children WHERE document_id = ?").run(documentId);
+    db.prepare("DELETE FROM rag_parents WHERE document_id = ?").run(documentId);
+    db.prepare("DELETE FROM rag_documents WHERE document_id = ?").run(documentId);
+  });
+}
+
+/** Index rows whose document no longer exists, e.g. deleted by an older build. */
+export function deleteOrphanChunks(projectId: string): void {
+  const orphans = getDb()
+    .prepare(
+      `SELECT document_id FROM rag_documents
+       WHERE project_id = ? AND document_id NOT IN (SELECT id FROM documents WHERE project_id = ?)`,
+    )
+    .all(projectId, projectId) as { document_id: string }[];
+  for (const { document_id } of orphans) deleteDocumentChunks(document_id);
+  if (orphans.length > 0) bumpRagVersion(projectId);
+}
+
+export interface RagChildRow {
+  id: string;
+  parent_id: string;
+  document_id: string;
+  text: string;
+  heading: string;
+  embedding: Uint8Array | null;
+  embed_model: string | null;
+}
+
+export function loadRagChildren(projectId: string): RagChildRow[] {
+  return getDb()
+    .prepare(
+      `SELECT c.id, c.parent_id, c.document_id, c.text, c.embedding, c.embed_model, p.heading
+       FROM rag_children c JOIN rag_parents p ON p.id = c.parent_id
+       WHERE c.project_id = ?
+       ORDER BY c.document_id, p.ord, c.ord`,
+    )
+    .all(projectId) as unknown as RagChildRow[];
+}
+
+export function listUnembeddedChildren(
+  projectId: string,
+  model: string,
+  limit: number,
+): { id: string; text: string; heading: string }[] {
+  return getDb()
+    .prepare(
+      `SELECT c.id, c.text, p.heading
+       FROM rag_children c JOIN rag_parents p ON p.id = c.parent_id
+       WHERE c.project_id = ? AND (c.embed_model IS NULL OR c.embed_model != ?)
+       ORDER BY c.document_id, p.ord, c.ord
+       LIMIT ?`,
+    )
+    .all(projectId, model, limit) as unknown as { id: string; text: string; heading: string }[];
+}
+
+export function saveEmbeddings(
+  projectId: string,
+  model: string,
+  rows: { id: string; vector: Uint8Array }[],
+): void {
+  const db = getDb();
+  const update = db.prepare(
+    "UPDATE rag_children SET embedding = ?, embed_model = ? WHERE id = ? AND project_id = ?",
+  );
+  inTransaction(() => {
+    for (const row of rows) update.run(row.vector, model, row.id, projectId);
+  });
+  bumpRagVersion(projectId);
+}
+
+export interface RagParentRow {
+  id: string;
+  document_id: string;
+  heading: string;
+  text: string;
+}
+
+export function getRagParents(projectId: string, ids: string[]): RagParentRow[] {
+  if (ids.length === 0) return [];
+  const marks = ids.map(() => "?").join(",");
+  return getDb()
+    .prepare(
+      `SELECT id, document_id, heading, text FROM rag_parents
+       WHERE project_id = ? AND id IN (${marks})`,
+    )
+    .all(projectId, ...ids) as unknown as RagParentRow[];
+}
+
+export interface RagStats {
+  documents: number;
+  indexedDocuments: number;
+  passages: number;
+  embedded: number;
+}
+
+export function ragStats(projectId: string, embedModel: string | null): RagStats {
+  const db = getDb();
+  const one = (sql: string, ...args: (string | null)[]) =>
+    (db.prepare(sql).get(...args) as { n: number }).n;
+  return {
+    documents: one("SELECT count(*) AS n FROM documents WHERE project_id = ?", projectId),
+    indexedDocuments: one(
+      "SELECT count(*) AS n FROM rag_documents WHERE project_id = ?",
+      projectId,
+    ),
+    passages: countRagChildren(projectId),
+    embedded: embedModel
+      ? one(
+          "SELECT count(*) AS n FROM rag_children WHERE project_id = ? AND embed_model = ?",
+          projectId,
+          embedModel,
+        )
+      : 0,
+  };
 }
 
 function toRun(row: Record<string, unknown>): RunRecord {

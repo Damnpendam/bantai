@@ -69,6 +69,15 @@ export interface Provider {
   /** False when the catalogue is public and can be listed before a key is saved. */
   listNeedsKey: boolean;
   json(apiKey: string, model: string, request: JsonRequest): Promise<string>;
+  /** Embedding model used for retrieval. Absent when the provider has no embeddings API. */
+  embedModel?: string;
+  embed?(
+    apiKey: string,
+    model: string,
+    texts: string[],
+    kind: "document" | "query",
+    signal?: AbortSignal,
+  ): Promise<number[][]>;
   verifyKey(apiKey: string): Promise<boolean>;
   listModels(apiKey: string): Promise<ModelOption[]>;
 }

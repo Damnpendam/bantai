@@ -49,6 +49,9 @@ You need the code in a GitHub repository (private is fine) and a Railway account
 
 ### Good to know
 
+- **Ask needs nothing extra.** The document index is in the same SQLite database on the
+  `/data` volume and is derived from the uploaded documents, so it is rebuilt on demand
+  and there is no second service, vector database or Python runtime to deploy.
 - **One instance.** Railway volumes can't be shared by replicas, and the app is
   single-process by design (run orchestration and rate limits live in memory). Scale up,
   not out.

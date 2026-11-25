@@ -111,6 +111,7 @@ export interface PlatformConfig {
   concurrency: number;
   dailyRuns: number;
   dailyIngests: number;
+  dailyAsks: number;
 }
 
 function positiveInt(value: string | undefined, fallback: number): number {
@@ -132,6 +133,7 @@ export function platformConfig(): PlatformConfig | null {
     concurrency: clampConcurrency(positiveInt(process.env.PLATFORM_CONCURRENCY, 2) || 2),
     dailyRuns: positiveInt(process.env.PLATFORM_DAILY_RUNS, 3),
     dailyIngests: positiveInt(process.env.PLATFORM_DAILY_INGESTS, 10),
+    dailyAsks: positiveInt(process.env.PLATFORM_DAILY_ASKS, 30),
   };
 }
 
@@ -168,7 +170,7 @@ export function noAccessMessage(workspaceId: string): string {
   return `Add an API key for ${getProvider(provider).label} in Settings before running.`;
 }
 
-export type UsageKind = "run" | "ingest";
+export type UsageKind = "run" | "ingest" | "ask";
 
 export function usageToday(workspaceId: string, kind: UsageKind): number {
   return countUsageSince(workspaceId, kind, Date.now() - DAY_MS, true);
@@ -183,9 +185,10 @@ export function quotaProblem(
   if (access.source !== "platform") return null;
   const platform = platformConfig();
   if (!platform) return null;
-  const limit = kind === "run" ? platform.dailyRuns : platform.dailyIngests;
+  const limit =
+    kind === "run" ? platform.dailyRuns : kind === "ingest" ? platform.dailyIngests : platform.dailyAsks;
   if (usageToday(workspaceId, kind) < limit) return null;
-  const what = kind === "run" ? "test-case runs" : "model builds";
+  const what = kind === "run" ? "test-case runs" : kind === "ingest" ? "model builds" : "questions";
   return `This workspace has used its ${limit} free ${what} for today on the shared key. Add your own API key in Settings to keep going, or try again tomorrow.`;
 }
 
