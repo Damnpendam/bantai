@@ -214,6 +214,27 @@ export const openrouterProvider: Provider = {
     }
   },
 
+  embedModel: "openai/text-embedding-3-small",
+
+  async embed(apiKey, model, texts, _kind, signal): Promise<number[][]> {
+    try {
+      const response = await client(apiKey).embeddings.create(
+        { model, input: texts, encoding_format: "float" },
+        { signal },
+      );
+      return [...response.data].sort((a, b) => a.index - b.index).map((d) => d.embedding);
+    } catch (error) {
+      if (error instanceof OpenAI.APIError && error.status === 404) {
+        // describe() points at the chat-model picker, which is the wrong place here.
+        throw new LlmError(
+          `OpenRouter has no embedding model "${model}" available to this key: ${apiMessage(error)}`,
+          false,
+        );
+      }
+      throw describe(error);
+    }
+  },
+
   async verifyKey(apiKey: string): Promise<boolean> {
     try {
       const response = await fetch(`${BASE_URL}/key`, {

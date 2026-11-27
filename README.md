@@ -55,6 +55,38 @@ Cancelling from a pause closes the run out rather than leaving it waiting foreve
 Each agent's charter lives in [`src/lib/agents/roster.ts`](src/lib/agents/roster.ts) —
 that file is where you tune what a discipline means for your team.
 
+## Ask your documents
+
+The **Ask** tab answers questions about a project's uploaded documents, using only what
+is in them, and shows which sections each answer rests on. It needs no extra service: the
+index lives in the same SQLite database, and it uses the workspace's existing model key.
+
+- **Hierarchical chunks.** Documents are cut along their headings into parent sections
+  (up to ~3,500 characters) and small child passages (~500). Children are what gets
+  searched, for precision; the parent a match came from is what gets read, for context.
+- **Hybrid search.** BM25 keyword search runs in-process and works the moment a document
+  is uploaded, with no model call. When an embedding provider is available, vector search
+  runs beside it and the two rankings are fused by reciprocal rank, so a question can match
+  a passage that shares none of its words.
+- **An agentic loop** ([`src/lib/rag/agent.ts`](src/lib/rag/agent.ts)). Each question is
+  planned into one to three standalone queries (or answered with a clarifying question when
+  it can't be searched at all), retrieved, graded for sufficiency, searched again in
+  different words if the first pass fell short, and only then answered — from the passages
+  alone, with `[n]` citations. If nothing relevant is found it says so rather than guessing.
+  The "How this was found" disclosure shows every step.
+- **Conversation memory.** The last few turns are sent along, so a follow-up like "and when
+  does it expire?" resolves against what was just discussed.
+
+Embeddings come from OpenRouter (`openai/text-embedding-3-small`) or Gemini
+(`gemini-embedding-001`). Anthropic has no embeddings API, so a workspace on Anthropic gets
+semantic search from any other saved key, and otherwise falls back to keyword search. The
+embedding model is stored beside each vector, so changing it re-embeds rather than
+comparing vectors that don't belong together. A project can hold up to 10,000 passages
+(`MAX_CHILDREN_PER_PROJECT`) so its vectors stay small enough to search in memory.
+
+On a shared platform key, questions are capped per workspace per day with
+`PLATFORM_DAILY_ASKS` (default 30).
+
 ## Running it
 
 ```bash
@@ -153,7 +185,8 @@ provider's `Retry-After` header and back off rather than retrying immediately.
 
 ### Adding another provider
 
-Implement [`Provider`](src/lib/providers/types.ts) — `json`, `verifyKey`, `listModels` —
+Implement [`Provider`](src/lib/providers/types.ts) — `json`, `verifyKey`, `listModels`,
+and optionally `embed` for semantic search —
 and register it in [`src/lib/providers/index.ts`](src/lib/providers/index.ts). The
 provider returns raw JSON text; parsing, schema validation and retry are handled once in
 [`src/lib/llm.ts`](src/lib/llm.ts), so a new provider gets that behaviour for free.
@@ -171,6 +204,11 @@ src/lib/llm.ts               provider-agnostic structured call, parse and retry
 src/lib/providers/           one file per provider, behind a single interface
 src/lib/settings.ts          per-provider keys and models, with legacy migration
 src/lib/json-salvage.ts      recovery of truncated or wrapped model output
+src/lib/rag/chunker.ts       parent/child chunking along document headings
+src/lib/rag/bm25.ts          keyword search and rank fusion
+src/lib/rag/indexer.ts       chunk sync (free) and resumable embedding
+src/lib/rag/retrieve.ts      hybrid search over a project's passages
+src/lib/rag/agent.ts         plan, retrieve, grade, re-query, answer
 src/lib/export.ts            the five export formats
 src/lib/store.ts             node:sqlite persistence — no native build step
 ```

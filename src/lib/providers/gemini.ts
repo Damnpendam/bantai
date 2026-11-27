@@ -153,6 +153,31 @@ export const geminiProvider: Provider = {
     }
   },
 
+  embedModel: "gemini-embedding-001",
+
+  async embed(apiKey, model, texts, kind, signal): Promise<number[][]> {
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await ai.models.embedContent({
+        model,
+        contents: texts,
+        config: {
+          taskType: kind === "query" ? "RETRIEVAL_QUERY" : "RETRIEVAL_DOCUMENT",
+          // The full 3072 is wasted on passages this short; the caller normalises.
+          outputDimensionality: 768,
+          abortSignal: signal,
+        },
+      });
+      const vectors = (response.embeddings ?? []).map((e) => e.values ?? []);
+      if (vectors.length !== texts.length) {
+        throw new LlmError("Gemini returned a different number of embeddings than inputs.", true);
+      }
+      return vectors;
+    } catch (error) {
+      throw error instanceof LlmError ? error : describe(error);
+    }
+  },
+
   async verifyKey(apiKey: string): Promise<boolean> {
     try {
       const ai = new GoogleGenAI({ apiKey });

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Ask } from "@/components/Ask";
 import { Documents } from "@/components/Documents";
 import { Model } from "@/components/Model";
 import { Roster } from "@/components/Roster";
@@ -89,7 +90,9 @@ export default function Home() {
   const [notice, setNotice] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
-  const [tab, setTab] = useState<"model" | "plan" | "cases" | "review">("model");
+  const [tab, setTab] = useState<"model" | "ask" | "plan" | "cases" | "review">("model");
+  // Ask is mounted the first time it is opened, then kept so the conversation survives tab switches.
+  const [askOpened, setAskOpened] = useState<Record<string, true>>({});
   const sourceRef = useRef<EventSource | null>(null);
   // Guards the auto-jump-to-Plan below so it fires once per gate, not on every
   // event the still-open stream delivers while paused there.
@@ -523,15 +526,25 @@ export default function Home() {
             <TabBar
               tabs={[
                 { id: "model", label: "Product model" },
+                { id: "ask", label: "Ask" },
                 { id: "plan", label: "Test plan" },
                 { id: "cases", label: "Test cases", count: kept.length },
                 { id: "review", label: "Review" },
               ]}
               active={tab}
-              onChange={setTab}
+              onChange={(next) => {
+                setTab(next);
+                if (next === "ask") setAskOpened((opened) => ({ ...opened, [active.id]: true }));
+              }}
             />
 
             {tab === "model" ? <Model projectId={active.id} docCount={docCount} /> : null}
+
+            {askOpened[active.id] ? (
+              <div hidden={tab !== "ask"}>
+                <Ask key={active.id} projectId={active.id} docCount={docCount} canAsk={canRun} />
+              </div>
+            ) : null}
 
             {tab === "plan" ? (
               run?.plan ? (
